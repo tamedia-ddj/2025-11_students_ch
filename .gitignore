@@ -137,8 +137,9 @@ vignettes/*.pdf
 *.utf8.md
 *.knit.md
 .Renviron
-docs/
-po/*~
+# Ne pas ignorer le dossier docs (site Quarto)
+!docs/
+!docs/**po/*~
 rsconnect/
 **/*_files/
 
