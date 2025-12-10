@@ -1,0 +1,684 @@
+---
+title: "evolution"
+author: "Olaf König"
+format:
+  html:
+    self-contained: true
+    page-layout: full
+    toc: true
+    toc-depth: 4
+    number-sections: true
+    number-depth: 4
+    code-line-numbers: true
+    code-fold: true
+execute:
+  warning: false
+  message: false
+theme: cosmo
+editor: visual
+---
+
+```{r libraries, message=FALSE}
+# Data manipulation
+library(tidyverse)
+library(readr)
+library(readxl)
+
+# Data visualization
+library(ggplot2)
+
+# Utility
+library(here)
+library(janitor)
+
+# Custom theme for plots
+theme_set(theme_minimal())
+
+# Disable scientific notation
+options(scipen = 999)
+# # Re-enable scientific notation (default behavior)
+# options(scipen = 0)
+```
+
+```{r setup-paths}
+# Define project paths
+input_raw_dir <- here("input", "raw")
+input_processed_dir <- here("input", "processed") 
+output_dir <- here("output")
+```
+
+## Import des datasets
+
+```{r}
+
+df_evo <- read.csv(file.path(input_processed_dir, "students_entries_2015_2025_cantons.csv")) |> 
+  select(-X)
+
+
+df_evo_ch <- df_evo |> 
+  group_by(sex, metric, year) |> 
+  summarise(
+    value = sum(value, na.rm = TRUE)
+  )  |> 
+    ungroup() |> 
+    arrange(year)  |> 
+    group_by(sex, metric) |> 
+    mutate(
+      index = (value / first(value) * 100) -100
+    )
+
+```
+
+### Import Cubes
+
+https://www.pxweb.bfs.admin.ch/pxweb/fr/px-x-1502040100_104/px-x-1502040100_104/px-x-1502040100_104.px/table/tableViewLayout2/ **Cube does not offer same figures than Excel Sheets....**
+
+```{r}
+# get_px <- function(url, chemin_local, nom_fichier) {
+#   # Construire le chemin complet pour le fichier local
+#   chemin_complet <- file.path(chemin_local, nom_fichier)
+  
+#   # Créer le répertoire local s'il n'existe pas
+#   if (!dir.exists(chemin_local)) {
+#     dir.create(chemin_local, recursive = TRUE)
+#   }
+  
+#   # Télécharger le fichier depuis l'URL et l'enregistrer localement
+#   download.file(url, destfile = chemin_complet, mode = "wb")
+  
+#   # Vérifier si le fichier a été correctement téléchargé
+#   if (file.exists(chemin_complet)) {
+#     message("Téléchargement réussi : ", chemin_complet)
+    
+#     # Lire et convertir l'encodage du fichier en UTF-8
+#     lignes <- readLines(chemin_complet, encoding = "Windows-1252")
+#     lignes_utf8 <- iconv(lignes, from = "Windows-1252", to = "UTF-8")
+    
+#     # Écrire les lignes converties dans le même fichier avec encodage UTF-8
+#     writeLines(lignes_utf8, file(chemin_complet, encoding = "UTF-8"))
+#     message("Encodage converti en UTF-8.")
+    
+#   } else {
+#     message("Échec du téléchargement.")
+#   }
+# }
+
+
+#------------- Utilisation de la fonction------------
+url <- "https://www.pxweb.bfs.admin.ch/sq/005df392-424f-451d-9124-e2acbf2a93d2"
+chemin_local <- input_raw_dir
+nom_fichier <- "px_students_foreigners.csv"
+
+# get_px(url, chemin_local, nom_fichier)
+
+df_students_foreigners <- read_csv(file.path(chemin_local, nom_fichier)) %>%
+janitor::clean_names()
+```
+
+#### PX agrégat au niveau national
+
+```{r}
+df_students_foreigners_long <- df_students_foreigners |>
+  mutate(year = as.numeric(substr(annee, 1, 4))) |> 
+  pivot_longer(
+    cols = bs:ethz,
+    names_to = "institution",
+    values_to = "value"
+  )
+
+df_students_foreigners_ch <- df_students_foreigners_long |> 
+  group_by(annee, nationalite_categorie) |> 
+  summarise(value = sum(value), .groups = "drop") |> 
+  mutate(year = as.numeric(substr(annee, 1, 4))) |> 
+  group_by(annee, year) |> 
+  mutate(
+    total = sum(value),
+    pct = 100 * value / total
+  ) |> 
+  ungroup()
+
+```
+
+### Graphique suisse vs Etranger National
+
+```{r}
+library(ggplot2)
+library(scales)
+
+# Choisit automatiquement le nouvel équivalent "k / M" si dispo
+label_short <- tryCatch(
+  scales::label_number(scale_cut = scales::cut_short_scale()),
+  error = function(e) scales::label_number()
+)
+
+p_stream_vol <- ggplot(
+  df_students_foreigners_ch,
+  aes(x = year, y = value, fill = nationalite_categorie)
+) +
+  geom_area(position = "stack", alpha = 0.9) +  # ou geom_stream(...) si tu as ggstream
+  scale_x_continuous(breaks = pretty(df_students_foreigners_ch$year)) +
+  scale_y_continuous(labels = label_short) +
+  labs(
+    title = "Étudiants (Suisse / Étranger) — Aire/Stream par année\nStudierende (Schweiz / Ausland) — nach Jahr",
+    x = "Année / Jahr",
+    y = "Étudiants (volume) / Studierende (Anzahl)",
+    fill = "Catégorie / Kategorie"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "top")
+
+p_stream_vol
+```
+
+#### DW Graphique Suisse vs étrangers
+
+https://app.datawrapper.de/tamedia/edit/c5sxp/upload
+
+```{r}
+
+dw_students_foreigners <- df_students_foreigners_ch |> 
+  select(-pct, - total, -annee) |> 
+  pivot_wider(
+    names_from = nationalite_categorie,
+    values_from = value
+  ) |> select(
+    year, Suisse, Etranger 
+  )
+
+dw_students_foreigners |> 
+  DatawRappr::dw_data_to_chart("c5sxp")
+```
+
+```{r}
+ggplot(
+  df_students_foreigners_ch,
+  aes(x = year, y = pct, color = nationalite_categorie, group = nationalite_categorie)
+) +
+  geom_line(linewidth = 1.1) +
+  scale_y_continuous(labels = scales::label_percent(scale = 1)) +
+  scale_x_continuous(breaks = pretty(df_students_foreigners_ch$year)) +
+  labs(
+    title = "Part des étudiants (%) — Suisse / Étranger\nAnteil Studierende (%) — Schweiz / Ausland",
+    x = "Année / Jahr",
+    y = "Part / Anteil (%)",
+    color = "Catégorie / Kategorie"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    legend.position = "top",
+    plot.title = element_text(face = "bold", lineheight = 1.1)
+  )
+```
+
+### Graphique suisse vs Etranger par institution
+
+Clé pour les noms
+
+```{r}
+library(tibble)
+
+institutions <- tribble(
+  ~institution, ~nom_fr, ~nom_de,
+  "BE",       "Université de Berne",                       "Universität Bern",
+  "BS",       "Université de Bâle",                        "Universität Basel",
+  "EPFL",     "École polytechnique fédérale de Lausanne",  "École polytechnique fédérale de Lausanne (EPFL)",
+  "ETHZ",     "École polytechnique fédérale de Zurich",    "Eidgenössische Technische Hochschule Zürich (ETHZ)",
+  "FR",       "Université de Fribourg",                    "Universität Freiburg",
+  "FS_CH",    "Formation universitaire à distance Suisse", "FernUni Schweiz",
+  "GE",       "Université de Genève",                      "Universität Genf",
+  "IHEID",    "Institut de hautes études internationales et du développement", 
+               "Graduate Institute of International and Development Studies (IHEID)",
+  "IUKB",     "Institut universitaire Kurt Bösch",         "Universitäres Institut Kurt Bösch",
+  "LS",       "Université de Lausanne",                    "Universität Lausanne",
+  "LU",       "Université de Lucerne",                     "Universität Luzern",
+  "NE",       "Université de Neuchâtel",                   "Universität Neuenburg",
+  "SG",       "Université de Saint-Gall",                  "Universität St. Gallen",
+  "PHSG_UI",  "Haute école pédagogique de Saint-Gall",     "Pädagogische Hochschule St. Gallen",
+  "TH_CHUR",  "Haute école de théologie de Coire",         "Theologische Hochschule Chur",
+  "USI",      "Université de la Suisse italienne",         "Università della Svizzera italiana (USI)",
+  "UZH",      "Université de Zurich",                      "Universität Zürich",
+  "TOTAL",    "Total",                                     "Total"
+)
+
+```
+
+```{r}
+library(ggplot2)
+library(scales)
+
+# Nettoyage / ordre facultatif
+df_students_foreigners_long <- df_students_foreigners_long |>
+  mutate(
+    nationalite_categorie = factor(
+      nationalite_categorie,
+      levels = c("Suisse", "Etranger")
+    ),
+    institution = toupper(institution) # si tu veux homogénéiser
+  )
+
+# Stream ou aire empilée par institution
+ggplot(
+  df_students_foreigners_long,
+  aes(x = year, y = value, fill = nationalite_categorie)
+) +
+  geom_area(position = "stack", alpha = 0.9) +
+  facet_wrap(~ institution, scales = "free_y") +
+  scale_x_continuous(breaks = pretty(df_students_foreigners_long$year)) +
+  scale_y_continuous(labels = scales::label_number(scale_cut = scales::cut_short_scale())) +
+  labs(
+    title = "Étudiants (Suisse / Étranger) par institution — Aire empilée\nStudierende (Schweiz / Ausland) nach Hochschule — Gestapelte Fläche",
+    x = "Année / Jahr",
+    y = "Étudiants (volume) / Studierende (Anzahl)",
+    fill = "Catégorie / Kategorie"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    legend.position = "top",
+    strip.text = element_text(face = "bold"),
+    plot.title = element_text(face = "bold", lineheight = 1.1)
+  )
+```
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(scales)
+
+# 1️⃣ Calcul du pourcentage par institution et année
+df_students_foreigners_pct <- df_students_foreigners_long |>
+  group_by(institution, year) |>
+  mutate(
+    total = sum(value),
+    pct = 100 * value / total
+  ) |>
+  ungroup()
+
+# 2️⃣ Graphique en lignes faceté
+ggplot(
+  df_students_foreigners_pct,
+  aes(x = year, y = pct, color = nationalite_categorie, group = nationalite_categorie)
+) +
+  geom_line(linewidth = 1) +
+  facet_wrap(~ institution, scales = "free_y") +
+  scale_x_continuous(breaks = pretty(df_students_foreigners_pct$year)) +
+  scale_y_continuous(labels = label_percent(scale = 1)) +
+  labs(
+    title = "Part des étudiants (%) — Suisse / Étranger par institution\nAnteil Studierende (%) — Schweiz / Ausland nach Hochschule",
+    x = "Année / Jahr",
+    y = "Part / Anteil (%)",
+    color = "Catégorie / Kategorie"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    legend.position = "top",
+    strip.text = element_text(face = "bold"),
+    plot.title = element_text(face = "bold", lineheight = 1.1)
+  )
+```
+
+#### DW Small Mulitples par institutions (part de Suisses)
+
+https://app.datawrapper.de/tamedia/edit/BV19M/upload
+
+```{r}
+ls_uni <- df_students_foreigners_long |> 
+  filter(year == max(year)) |> 
+  group_by(institution) |> 
+  summarise(value = sum(value)) |> 
+  slice_max(value, n = 10) |> 
+  pull(institution)
+
+
+df_students_foreigners_ch <- df_students_foreigners_ch  |> 
+  mutate(
+    nom_fr = "Suisse",
+    nom_de = "Schweiz"
+  )
+
+```
+
+```{r}
+
+
+df_students_foreigners_pct |> 
+  left_join(institutions) |> 
+    filter(nationalite_categorie == "Suisse") |> 
+    filter(institution %in% ls_uni) |> 
+  select(year, nom_fr, pct) |> 
+  rbind(
+    df_students_foreigners_ch  |> 
+      filter(nationalite_categorie == "Suisse") |> 
+      select(year, nom_fr, pct)
+  ) |> 
+  pivot_wider(
+    names_from = nom_fr,
+    values_from = pct
+  ) |> 
+    DatawRappr::dw_data_to_chart("BV19M")
+
+```
+
+## Check dataset issu de Excel
+
+Je regarde si les agégats des données correpondent bien au totaux de la table. Les étrangers n'y sont pas... (je les reprends de PX Web)
+
+```{r}
+df_evo |> 
+  group_by(metric, sex, year) |> 
+  summarise(
+    total = sum(value)
+  ) |> 
+    ungroup() |> 
+    view()
+```
+
+### Indexed par cantons
+
+```{r}
+
+df_evo_indexed <- df_evo %>%
+  group_by(metric, region, sex) %>%
+  arrange(year) %>%
+  mutate(index_base = value / first(value) * 100) %>%
+  ungroup()
+
+```
+
+## ggplot SM entrants
+
+```{r}
+# Vue d'ensemble par canton
+df_evo_indexed %>%
+  filter(metric == "entrants") %>%  
+  ggplot(aes(year, index_base, color = sex, group = interaction(region, sex))) +
+  geom_line(alpha = 1) +
+  geom_hline(yintercept = 100, linetype = "dashed") +
+  theme_minimal() +
+  facet_wrap(~region) +
+  labs(title = "Évolution indexée (2015 = 100)")
+
+```
+
+## ggplot SM étudiants
+
+```{r}
+
+gg_evo_students_canton <- df_evo_indexed %>%
+  filter(metric == "etudiants_HS") %>% 
+  ggplot(aes(year, index_base, color = sex, group = interaction(region, sex))) +
+  geom_line(alpha = 1) +
+  geom_hline(yintercept = 100, linetype = "dashed") +
+  theme_minimal() +
+  facet_wrap(~region) +
+  labs(title = "Évolution indexée (2015 = 100)")
+
+plotly::ggplotly(gg_evo_students_canton)
+```
+
+**Commentaire** Partout l'évolution des étudiantes femmes est supérieure aux hommes en 2024. Exception de Basel-Stadt et Glarus. qui ont des taux très stagnants...
+
+### DW SM Évolution des étudiants par cantons
+
+https://app.datawrapper.de/tamedia/edit/LgG3A/describe
+
+```{r}
+df_evo_indexed %>%
+  filter(metric == "etudiants_HS", sex == "Total") |> 
+  select(
+    canton, year, index_base
+  ) |> 
+    mutate( # transformation en tx de variation
+      index_base = index_base -100
+    ) |> 
+    pivot_wider(
+      names_from = canton,
+      values_from = index_base
+    ) |> 
+      DatawRappr::dw_data_to_chart("LgG3A")
+```
+
+### DW Carte des cantons
+
+https://app.datawrapper.de/tamedia/edit/GWw7l/data#match
+
+```{r}
+id_canton <- tamMap::canton_CH()  |> 
+  select(
+    order, iso2
+  )
+
+df_evo_indexed |> 
+  left_join(id_canton, by = c("canton" = "iso2")) |> 
+  filter(metric == "etudiants_HS") |> 
+  filter(year == 2025) |> 
+  select(canton, order, sex, index_base) |> 
+  mutate(index_base = index_base - 100) |> 
+  pivot_wider(
+    names_from = "sex",
+    values_from = "index_base"
+  ) |> 
+    DatawRappr::dw_data_to_chart("GWw7l")
+
+```
+
+### Commentaire
+
+**Patterns généraux** Croissance forte (\>20% en 2024-2025)
+
+VD : +27% → +29% (la plus forte) ZG : +25% → +30% ZH : +20% → +23% ZG, GE, BE, BS : croissances soutenues mais variables
+
+Décroissance marquée
+
+AR : -17% → -20% AI : -23% → -24% UR : -18% (stabilisé depuis 2022)
+
+Stabilité relative
+
+SG, TG, LU : variations modérées (\<6%)
+
+Points d'intérêt
+
+Rupture 2020-2021 : accélération brutale dans plusieurs cantons (VD +5% → +10%, ZH +10% → +17%, ZG +7% → +14%) Contrastes urbain-rural : les cantons urbains/universitaires (VD, ZH, ZG, GE) explosent, les petits cantons alpins (AI, UR, AR) perdent des étudiants 2024-2025 : nouvelle accélération dans certains cantons (VD, ZG)
+
+### Import données financières
+
+https://www.pxweb.bfs.admin.ch/pxweb/fr/px-x-1506030100_203/px-x-1506030100_203/px-x-1506030100_203.px/table/tableViewLayout2/
+
+```{r}
+url <- "https://www.pxweb.bfs.admin.ch/sq/e6157caf-559c-443a-b9eb-24a3d468cce4"
+chemin_local <- input_raw_dir
+nom_fichier <- "px_finances.csv"
+
+# get_px(url, chemin_local, nom_fichier)
+
+df_finances <- read_csv(file.path(chemin_local, nom_fichier)) %>%
+janitor::clean_names()
+
+
+```
+
+#### Clean finances
+
+```{r}
+df_finances_long <- df_finances |> 
+  rename(
+    year = annee
+  ) |> 
+  pivot_longer(
+    cols = haute_ecole_total:autres_iu,
+    names_to = "institution",
+    values_to = "costs"
+  ) |> 
+    mutate(
+      institution = toupper(institution)
+      )
+
+unique(df_finances_long$prestation)
+# [1] "Enseignement: études de base"        "Enseignement: formation approfondie" "Recherche et développement (RD)"    
+# [4] "Formation continue"                  "Prestations de service"   
+```
+
+#### Total costs
+
+```{r}
+df_finances_long_total_costs <- df_finances_long |> 
+  group_by(institution, year) |> 
+  summarise(
+    total_costs = sum(costs, na.rm = TRUE)
+  )
+```
+
+```{r}
+ggplot(df_finances_long_total_costs, aes(x = year, y = total_costs / 10^9)) +
+  geom_area() +
+  facet_wrap(vars(institution), scales = "free_y") # "fixed")
+```
+
+#### R&D
+
+```{r}
+
+df_finances_r_and_d <- df_finances_long |> 
+  filter(prestation == "Recherche et développement (RD)")
+
+```
+
+#### Chart R&D
+
+```{r}
+ggplot(df_finances_r_and_d, 
+       aes(x = year, y = costs)) +
+  geom_line(linewidth = 1, color = "#2C3E50") +
+  geom_point(size = 2, color = "#2C3E50") +
+  facet_wrap(~ institution, scales = "free_y") +
+  scale_y_continuous(labels = scales::comma_format()) +
+  labs(
+    title = "Coût recherche et développement (2006–…)",
+    subtitle = "Coûts de R&D",
+    x = "Année",
+    y = "Coûts (CHF)"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    strip.text = element_text(face = "bold"),
+    plot.title = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+```
+
+#### Chart ranking
+
+```{r}
+ggplot(
+  df_finances_r_and_d |> 
+    filter(year == max(year, na.rm = TRUE)),
+  aes(x = costs, y = reorder(institution, costs))
+) +
+  geom_col(fill = "#2C3E50") +
+  # coord_flip() +
+  scale_x_continuous(labels = scales::comma_format()) +
+  labs(
+    title = paste("Dépenses R&D par institution —", max(df_finances_r_and_d$year, na.rm = TRUE)),
+    x = "Coût (CHF)",
+    y = NULL
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    axis.text.y = element_text(face = "bold"),
+    panel.grid.major.y = element_blank()
+  )
+
+```
+
+#### Teaching costs
+
+```{r}
+df_teaching_costs <- df_finances_long |> 
+  filter(prestation  %in% c("Enseignement: études de base","Enseignement: formation approfondie")) |> 
+  group_by(institution, year) |> 
+  summarise(
+    teaching_costs = sum(costs, na.rm = TRUE)
+  )
+
+df_students_costs_institution <- df_students_foreigners_long |> 
+  group_by(year, institution) |> 
+  summarise(
+    students = sum(value)
+  )  |> 
+    ungroup() |> 
+    left_join(df_teaching_costs) |> 
+    filter(year >= 2006) |> 
+    mutate(
+      cost_per_student = teaching_costs / students
+    )
+
+```
+
+#### Chart teaching costs per students
+
+```{r}
+
+ggplot(df_students_costs_institution, 
+       aes(x = year, y = cost_per_student)) +
+  geom_line(linewidth = 1, color = "#2C3E50") +
+  geom_point(size = 2, color = "#2C3E50") +
+  facet_wrap(~ institution, scales = "fixed") +
+  scale_y_continuous(labels = scales::comma_format()) +
+  labs(
+    title = "Coût par étudiant selon l’institution (2006–…)",
+    subtitle = "Somme des coûts d’enseignement / nombre total d’étudiants",
+    x = "Année",
+    y = "Coût par étudiant (CHF)"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    strip.text = element_text(face = "bold"),
+    plot.title = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+```
+
+#### Chart teaching cost per student insitution
+
+```{r}
+
+last_year <- 2023
+
+# --- Préparer les données ---
+df_last <- df_students_costs_institution |>
+  filter(year == last_year) |>
+  filter(!is.na(cost_per_student)) |> 
+  arrange(cost_per_student) |>
+  mutate(institution = factor(institution, levels = unique(institution)))
+
+# --- Graphique ---
+ggplot(df_last, aes(x = cost_per_student, y = institution)) +
+  geom_col(fill = "#000000ff") +
+  geom_text(aes(label = scales::comma(round(cost_per_student, 0))),
+            hjust = -0.1, size = 3.5) +
+  scale_x_continuous(labels = scales::comma_format()) +
+  labs(
+    title = paste("Coût par étudiant par institution —", last_year),
+    subtitle = "Somme des coûts d’enseignement / nombre total d’étudiants étrangers",
+    x = "Coût par étudiant (CHF)",
+    y = NULL
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    axis.text.y = element_text(face = "bold"),
+    panel.grid.major.y = element_blank()
+  ) +
+  coord_cartesian(clip = "off")
+```
+
+### DW Teaching costs per students
+
+https://app.datawrapper.de/tamedia/edit/E8kGh/upload
+
+```{r}
+df_last  |> 
+  left_join(institutions) |> 
+  select(institution, nom_fr,nom_de, everything()) |> 
+  DatawRappr::dw_data_to_chart("E8kGh")
+```

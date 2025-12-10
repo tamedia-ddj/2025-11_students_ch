@@ -1,0 +1,27 @@
+project:
+  type: website
+  output-dir: ../docs
+  render:
+    - index.qmd
+    - discipline.qmd
+    - districts.qmd
+    - evolution.qmd
+
+website:
+  title: "Étudiants 2025 – CH"
+  navbar:
+    left:
+      - href: index.qmd
+        text: Accueil
+      - href: discipline.qmd
+        text: Discipline
+      - href: districts.qmd
+        text: Districts
+      - href: evolution.qmd
+        text: Évolution
+
+format:
+  html:
+    theme: cosmo
+    toc: true
+    number-sections: true

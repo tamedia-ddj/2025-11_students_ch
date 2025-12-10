@@ -1,0 +1,777 @@
+---
+title: "[Project Name]"
+author: "Olaf König"
+format:
+  html:
+    self-contained: true
+    page-layout: full
+    toc: true
+    toc-depth: 4
+    number-sections: true
+    number-depth: 4
+    code-line-numbers: true
+    code-fold: true
+execute:
+  warning: false
+  message: false
+theme: cosmo
+editor: visual
+---
+
+# Objectives
+
+**Main goal:** \[What this script accomplishes\]
+
+**Goals**
+
+-   \[Objective 1\]
+
+-   \[Objective 2\]
+
+------------------------------------------------------------------------
+
+## Inputs
+
+| Object Name | File Name    | Source                 | Extension |
+|-------------|--------------|------------------------|-----------|
+| \[df_name\] | \[filename\] | \[description/source\] | .csv      |
+| \[df_name\] | \[filename\] | \[description/source\] | .xlsx     |
+
+## Outputs
+
+| Object Name   | File Name    | Source                           | Extension |
+|---------------|--------------|----------------------------------|-----------|
+| \[df_clean\]  | \[filename\] | \[description/what it contains\] | .csv      |
+| \[plot_main\] | \[filename\] | \[description/what it contains\] | .png      |
+
+------------------------------------------------------------------------
+
+# Setup
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width = 10,
+  fig.height = 6
+)
+```
+
+```{r libraries, message=FALSE}
+# Data manipulation
+library(tidyverse)
+library(readr)
+library(readxl)
+
+# Data visualization
+library(ggplot2)
+
+# Utility
+library(here)
+library(janitor)
+
+# Custom theme for plots
+theme_set(theme_minimal())
+
+# Disable scientific notation
+options(scipen = 999)
+# # Re-enable scientific notation (default behavior)
+# options(scipen = 0)
+```
+
+```{r setup-paths}
+# Define project paths
+input_raw_dir <- here("input", "raw")
+input_processed_dir <- here("input", "processed") 
+output_dir <- here("output")
+```
+
+------------------------------------------------------------------------
+
+# Data Import
+
+## étudiants + entrées + diplomes par cantons (su-b-15.02.04-he-02.xlsx)
+
+```{r import}
+# Load data
+# fichier étudiants + entrées + diplomes par cantons 
+# Packages
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(purrr)
+library(janitor)
+
+
+library(readxl)
+library(tidyverse)
+
+# Chemin du fichier
+path <- file.path(input_raw_dir, "su-b-15.02.04-he-02.xlsx")
+
+
+# Packages
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(purrr)
+
+# Fichier
+xlsx_path <- path
+
+# Feuilles à parcourir (tous les cantons + Étranger)
+skip <- c("tpl", "Hinweise_Remarques", "Total")
+sheets <- setdiff(excel_sheets(xlsx_path), skip)
+
+# Normalisation des noms d’unités (BS, BE, ..., FS-CH, ETHZ, TH-Chur, TOTAL)
+std_unit <- function(x){
+  x |>
+    str_replace_all("\\s+", "") |>
+    str_replace_all("FS[- ]?CH", "FS-CH") |>
+    str_replace_all("TH[- ]?Chur", "TH-Chur") |>
+    toupper() |>
+    str_replace("^TH-CHUR$", "TH-Chur")
+}
+
+# Lecture d'un bloc fixe (plage donnée) pour une feuille
+read_block_fixed <- function(path, sheet, range, metric){
+  raw <- read_excel(path, sheet = sheet, range = range, col_names = FALSE, col_types = "text")
+
+  # 1re ligne = en-têtes ; B6 est vide -> devient le libellé de domaine
+  hdr <- as.character(unlist(raw[1, ], use.names = FALSE))
+  units <- std_unit(hdr[-1])                # colonnes d'unités (BS...TOTAL)
+  dat <- raw[-1, , drop = FALSE]            # données sans la ligne d'en-tête
+  colnames(dat) <- c("domaine", units)      # noms propres
+
+  # conversion numérique et passage en long
+  dat |>
+    mutate(across(-domaine, ~ suppressWarnings(as.numeric(str_replace(.x, "\\s", ""))))) |>
+    pivot_longer(cols = -domaine, names_to = "unite", values_to = "valeur") |>
+    mutate(
+      region = ifelse(sheet == "Ausland-Étranger", "Étranger", sheet),
+      metric = metric
+    ) |>
+    select(region, metric, domaine, unite, valeur)
+}
+
+# Ranges fixes
+ranges <- list(
+  etudiants = "B6:R14",
+  entrants  = "B19:R27",
+  diplomes  = "B32:R40"
+)
+
+# Boucle principale : toutes les feuilles x 3 blocs
+df_final <- map_dfr(
+  sheets,
+  ~ bind_rows(
+      read_block_fixed(xlsx_path, .x, ranges$etudiants, "etudiants_automne"),
+      read_block_fixed(xlsx_path, .x, ranges$entrants,  "entrants_automne"),
+      read_block_fixed(xlsx_path, .x, ranges$diplomes,  "diplomes")
+    )
+) |>
+  arrange(region, metric, domaine, unite)
+
+# Aperçu
+print(df_final, n = 50)
+```
+
+```{r}
+
+library(dplyr)
+
+# Créer le mapping manuel
+mapping <- tibble::tribble(
+  ~region, ~canton,
+  "Aargau", "AG",
+  "AppenzellA.Rh.", "AR",
+  "AppenzellI.Rh.", "AI",
+  "Basel-Landschaft", "BL",
+  "Basel-Stadt", "BS",
+  "Bern–Berne", "BE",
+  "Fribourg–Freiburg", "FR",
+  "Genève", "GE",
+  "Glarus", "GL",
+  "Graubünden–Grigioni–Grischun", "GR",
+  "Jura", "JU",
+  "Luzern", "LU",
+  "Neuchâtel", "NE",
+  "Nidwalden", "NW",
+  "Obwalden", "OW",
+  "Schaffhausen", "SH",
+  "Schwyz", "SZ",
+  "Solothurn", "SO",
+  "St.Gallen", "SG",
+  "Thurgau", "TG",
+  "Ticino", "TI",
+  "Uri", "UR",
+  "Valais–Wallis", "VS",
+  "Vaud", "VD",
+  "Zug", "ZG",
+  "Zürich", "ZH",
+  "Étranger", "ZZ"
+)
+
+# Joindre à ton dataframe
+df_final <- df_final %>%
+  left_join(mapping, by = "region")
+
+library(dplyr)
+
+# Mapping des institutions
+mapping_institutions <- tibble::tribble(
+  ~unite, ~institution,
+  "BE", "Université de Berne",
+  "BS", "Université de Bâle",
+  "EPFL", "EPFL",
+  "ETHZ", "ETHZ",
+  "FR", "Université de Fribourg",
+  "FS-CH", "Formation universitaire à distance Suisse",
+  "GE", "Université de Genève",
+  "IHEID", "Institut de hautes études internationales et du développement",
+  "LS", "Université de Lausanne",
+  "LU", "Université de Lucerne",
+  "NE", "Université de Neuchâtel",
+  "SG", "Université de Saint-Gall",
+  "TH-Chur", "Theologische Hochschule Chur",
+  "TOTAL", "Total",
+  "USI", "Université de la Suisse italienne",
+  "UZH", "Université de Zurich"
+)
+
+# Appliquer le renommage
+df_final <- df_final %>%
+  left_join(mapping_institutions, by = "unite")
+
+# # Export du dataframe 
+df_final |> 
+  write.csv(file.path(input_processed_dir, "students_entries_spectialities_24_25_cantons.csv")) 
+
+```
+
+## Etudiants et entrées par cantons et par districts, série temporelle - (su-b-15.02.04-he-01.xlsx)
+
+```{r}
+
+# Packages
+library(readxl)
+library(dplyr)
+library(stringr)
+library(purrr)
+library(tidyr)
+
+# Fichier
+xlsx_path <- file.path(input_raw_dir, "su-b-15.02.04-he-01.xlsx")
+
+# Packages
+library(readxl)
+library(dplyr)
+library(stringr)
+library(purrr)
+library(tidyr)
+
+
+
+# Feuilles à parcourir (tous les cantons)
+skip <- c("tpl", "Hinweise_Remarques", "Total")
+sheets <- setdiff(excel_sheets(xlsx_path), skip)
+
+# ---- helpers tolérants ----
+find_header_row <- function(df_chr){
+  # cherche la ligne contenant "Bezirk/District" (casse/espaces tolérés)
+  for (i in seq_len(nrow(df_chr))) {
+    row_vals <- df_chr[i, , drop = FALSE] |> unlist(use.names = FALSE)
+    row_vals <- stringr::str_squish(trimws(as.character(row_vals)))
+    if (any(stringr::str_detect(row_vals, regex("^Bezirk\\s*/\\s*District$", ignore_case = TRUE)),
+            na.rm = TRUE)) return(i)
+  }
+  NA_integer_
+}
+
+find_total_row <- function(df_chr, start_row){
+  # cherche "Total Kanton/Canton" dans la colonne B (ou n'importe où si besoin)
+  # on accepte variantes "Total Kanton", "Total Canton"
+  pat <- regex("^Total\\s+(Kanton|Canton)(/Canton)?", ignore_case = TRUE)
+  # d'abord col B
+  for (i in seq.int(start_row + 1L, nrow(df_chr))) {
+    val <- as.character(df_chr[i, 2, drop = TRUE])
+    if (!is.na(val) && str_detect(str_squish(val), pat)) return(i)
+  }
+  # fallback: n'importe quelle colonne
+  for (i in seq.int(start_row + 1L, nrow(df_chr))) {
+    row_vals <- df_chr[i, , drop = FALSE] |> unlist(use.names = FALSE)
+    row_vals <- str_squish(as.character(row_vals))
+    if (any(str_detect(row_vals, pat), na.rm = TRUE)) return(i)
+  }
+  NA_integer_
+}
+
+# tibble vide mais typé (pour éviter les erreurs d'arrange)
+empty_out <- function(){
+  tibble(
+    region = character(),
+    district = character(),
+    bev_pop_total = numeric(),
+    stu_et_total = numeric(),
+    permille_total = numeric(),
+    bev_pop_h = numeric(),
+    stu_et_h = numeric(),
+    permille_h = numeric(),
+    pct_h = numeric(),
+    bev_pop_f = numeric(),
+    stu_et_f = numeric(),
+    permille_f = numeric(),
+    pct_f = numeric()
+  )
+}
+
+# Lecture d'une feuille
+read_districts_one_sheet <- function(path, sheet){
+  raw <- readxl::read_excel(path, sheet = sheet, col_names = FALSE, col_types = "text")
+  # détection
+  header_row <- find_header_row(raw)
+  if (is.na(header_row)) return(empty_out())
+
+  total_row  <- find_total_row(raw, header_row)
+  if (is.na(total_row) || total_row <= header_row + 1L) return(empty_out())
+
+  # plage B:M (données sous l'en-tête jusqu'à la ligne "Total")
+  rng <- sprintf("B%d:M%d", header_row + 1L, total_row)
+  dat <- suppressMessages(readxl::read_excel(path, sheet = sheet, range = rng,
+                                             col_names = FALSE, col_types = "text"))
+
+  # on s'assure d'avoir 12 colonnes (B..M), sinon on complète/recadre
+  if (ncol(dat) < 12) {
+    dat <- dplyr::bind_cols(dat, as_tibble(matrix(NA_character_, nrow(dat), 12 - ncol(dat))))
+  } else if (ncol(dat) > 12) {
+    dat <- dat[, 1:12, drop = FALSE]
+  }
+
+  names(dat) <- c(
+    "district_raw",
+    "bev_pop_total", "stu_et_total", "permille_total",
+    "bev_pop_h",    "stu_et_h",     "permille_h",
+    "pct_h",
+    "bev_pop_f",    "stu_et_f",     "permille_f",
+    "pct_f"
+  )
+
+  out <- dat |>
+    # retirer la ligne "Total Kanton/Canton"
+    filter(!str_detect(str_squish(coalesce(district_raw, "")),
+                       regex("^Total\\s+(Kanton|Canton)(/Canton)?", ignore_case = TRUE))) |>
+    mutate(
+      district = district_raw |>
+        str_replace("^Bezirk\\s+", "") |>
+        str_replace("^District\\s+", "") |>
+        str_squish(),
+      across(c(bev_pop_total, stu_et_total, permille_total,
+               bev_pop_h,    stu_et_h,    permille_h, pct_h,
+               bev_pop_f,    stu_et_f,    permille_f, pct_f),
+             ~ suppressWarnings(as.numeric(str_replace(.x, "\\s", "")))),
+      region = sheet
+    ) |>
+    select(region, district,
+           bev_pop_total, stu_et_total, permille_total,
+           bev_pop_h, stu_et_h, permille_h, pct_h,
+           bev_pop_f, stu_et_f, permille_f, pct_f)
+
+  out
+}
+
+# ---- Exécution sur toutes les feuilles ----
+df_districts <- purrr::map_dfr(sheets, ~ read_districts_one_sheet(xlsx_path, .x)) |>
+  mutate(region = if_else(region == "Ausland-Étranger", "Étranger", region)) |>
+  arrange(region, district)
+
+# Résultat
+print(df_districts, n = 50)
+
+# (optionnel) long format :
+# df_long <- df_districts |>
+#   pivot_longer(-c(region, district), names_to = "mesure", values_to = "valeur")
+
+```
+
+## Etat des districts
+
+```{r}
+
+# Requete des niveaux géographiques
+get_geolevel <- function(date1){
+  url <- str_c("https://sms.bfs.admin.ch/WcfBFSSpecificService.svc/AnonymousRest/communes/levels?startPeriod=",date1,"&endPeriod=",date1,"&useBfsCode=false&labelLanguages=fr&format=csv")
+  result <- read_csv(url)
+}
+
+spatial_index <- get_geolevel("11-11-2025")
+
+```
+
+```{r}
+
+spatial_index <- spatial_index |> 
+  select(HR_HGDE_HIST_L2, HR_HGDE_HIST_L2_Name_fr, HR_HGDE_HIST_L1) |> 
+  group_by(HR_HGDE_HIST_L2, HR_HGDE_HIST_L2_Name_fr, HR_HGDE_HIST_L1) |> 
+  summarise()
+
+```
+
+```{r}
+
+# clé
+# Création de la clé de correspondance
+district_key <- tribble(
+  ~district, ~HR_HGDE_HIST_L2_Name_fr,
+  # Argovie (AG)
+  "Aarau", "Bezirk Aarau",
+  "Baden", "Bezirk Baden",
+  "Bremgarten", "Bezirk Bremgarten",
+  "Brugg", "Bezirk Brugg",
+  "Kulm", "Bezirk Kulm",
+  "Laufenburg", "Bezirk Laufenburg",
+  "Lenzburg", "Bezirk Lenzburg",
+  "Muri", "Bezirk Muri",
+  "Rheinfelden", "Bezirk Rheinfelden",
+  "Zofingen", "Bezirk Zofingen",
+  "Zurzach", "Bezirk Zurzach",
+  # Appenzell Rhodes-Intérieures (AI)
+  "Hinterland", "Bezirk Hinterland",
+  "Mittelland", "Bezirk Mittelland",
+  "Vorderland", "Bezirk Vorderland",
+  "Appenzell I.Rh.", "Kanton Appenzell Innerrhoden",
+  # Bâle-Campagne (BL)
+  "Arlesheim", "Bezirk Arlesheim",
+  "Laufen", "Bezirk Laufen",
+  "Liestal", "Bezirk Liestal",
+  "Sissach", "Bezirk Sissach",
+  "Waldenburg", "Bezirk Waldenburg",
+  # Bâle-Ville (BS)
+  "Basel-Stadt", "Kanton Basel-Stadt",
+  # Berne (BE)
+  "Arrondissement Administratif Jura Bernois", "Arrondissement administratif Jura bernois",
+  "Verwaltungskreis Bern-Mittelland", "Verwaltungskreis Bern-Mittelland",
+  "Verwaltungskreis Biel/Bienne", "Verwaltungskreis Biel/Bienne",
+  "Verwaltungskreis Emmental", "Verwaltungskreis Emmental",
+  "Verwaltungskreis Frutigen-Niedersimmental", "Verwaltungskreis Frutigen-Niedersimmental",
+  "Verwaltungskreis Interlaken-Oberhasli", "Verwaltungskreis Interlaken-Oberhasli",
+  "Verwaltungskreis Oberaargau", "Verwaltungskreis Oberaargau",
+  "Verwaltungskreis Obersimmental-Saanen", "Verwaltungskreis Obersimmental-Saanen",
+  "Verwaltungskreis Seeland", "Verwaltungskreis Seeland",
+  "Verwaltungskreis Thun", "Verwaltungskreis Thun",
+  # Fribourg (FR)
+  "De La Broye", "District de la Broye",
+  "De La Glâne", "District de la Glâne",
+  "De La Gruyère", "District de la Gruyère",
+  "De La Sarine", "District de la Sarine",
+  "De La Veveyse", "District de la Veveyse",
+  "See/District Du Lac", "Bezirk See / District du Lac",
+  "Sense", "Bezirk Sense",
+  # Genève (GE)
+  "Genf", "Canton de Genève",
+  # Glaris (GL)
+  "Glarus", "Kanton Glarus",
+  # Grisons (GR)
+  "Region Albula", "Region Albula",
+  "Region Bernina", "Region Bernina",
+  "Region Engiadina Bassa/Val Müstair", "Region Engiadina Bassa / Val Müstair",
+  "Region Imboden", "Region Imboden",
+  "Region Landquart", "Region Landquart",
+  "Region Maloja", "Region Maloja",
+  "Region Moesa", "Region Moesa",
+  "Region Plessur", "Region Plessur",
+  "Region Prättigau/Davos", "Region Prättigau / Davos",
+  "Region Surselva", "Region Surselva",
+  "Region Viamala", "Region Viamala",
+  # Jura (JU)
+  "De Delémont", "District de Delémont",
+  "De Porrentruy", "District de Porrentruy",
+  "Des Franches-Montagnes", "District des Franches-Montagnes",
+  # Lucerne (LU)
+  "Wahlkreis Entlebuch", "Wahlkreis Entlebuch",
+  "Wahlkreis Hochdorf", "Wahlkreis Hochdorf",
+  "Wahlkreis Luzern-Land", "Wahlkreis Luzern-Land",
+  "Wahlkreis Luzern-Stadt", "Wahlkreis Luzern-Stadt",
+  "Wahlkreis Sursee", "Wahlkreis Sursee",
+  "Wahlkreis Willisau", "Wahlkreis Willisau",
+  # Neuchâtel (NE)
+  "Neuenburg", "Canton de Neuchâtel",
+  # Nidwald (NW)
+  "Nidwalden", "Kanton Nidwalden",
+  # Obwald (OW)
+  "Obwalden", "Kanton Obwalden",
+  # Schaffhouse (SH)
+  "Oberklettgau", "Bezirk Oberklettgau",
+  "Reiat", "Bezirk Reiat",
+  "Schaffhausen", "Bezirk Schaffhausen",
+  "Schleitheim", "Bezirk Schleitheim",
+  "Stein", "Bezirk Stein",
+  "Unterklettgau", "Bezirk Unterklettgau",
+  # Schwyz (SZ)
+  "Einsiedeln", "Bezirk Einsiedeln",
+  "Gersau", "Bezirk Gersau",
+  "Höfe", "Bezirk Höfe",
+  "Küssnacht (Sz)", "Bezirk Küssnacht (SZ)",
+  "March", "Bezirk March",
+  "Schwyz", "Bezirk Schwyz",
+  # Soleure (SO)
+  "Bucheggberg", "Bezirk Bucheggberg",
+  "Dorneck", "Bezirk Dorneck",
+  "Gäu", "Bezirk Gäu",
+  "Gösgen", "Bezirk Gösgen",
+  "Lebern", "Bezirk Lebern",
+  "Olten", "Bezirk Olten",
+  "Solothurn", "Bezirk Solothurn",
+  "Thal", "Bezirk Thal",
+  "Thierstein", "Bezirk Thierstein",
+  "Wasseramt", "Bezirk Wasseramt",
+  # Saint-Gall (SG)
+  "Wahlkreis Rheintal", "Wahlkreis Rheintal",
+  "Wahlkreis Rorschach", "Wahlkreis Rorschach",
+  "Wahlkreis Sarganserland", "Wahlkreis Sarganserland",
+  "Wahlkreis See-Gaster", "Wahlkreis See-Gaster",
+  "Wahlkreis St. Gallen", "Wahlkreis St. Gallen",
+  "Wahlkreis Toggenburg", "Wahlkreis Toggenburg",
+  "Wahlkreis Werdenberg", "Wahlkreis Werdenberg",
+  "Wahlkreis Wil", "Wahlkreis Wil",
+  # Thurgovie (TG)
+  "Arbon", "Bezirk Arbon",
+  "Frauenfeld", "Bezirk Frauenfeld",
+  "Kreuzlingen", "Bezirk Kreuzlingen",
+  "Münchwilen", "Bezirk Münchwilen",
+  "Weinfelden", "Bezirk Weinfelden",
+  # Tessin (TI)
+  "Distretto Di Bellinzona", "Distretto di Bellinzona",
+  "Distretto Di Blenio", "Distretto di Blenio",
+  "Distretto Di Leventina", "Distretto di Leventina",
+  "Distretto Di Locarno", "Distretto di Locarno",
+  "Distretto Di Lugano", "Distretto di Lugano",
+  "Distretto Di Mendrisio", "Distretto di Mendrisio",
+  "Distretto Di Riviera", "Distretto di Riviera",
+  "Distretto Di Vallemaggia", "Distretto di Vallemaggia",
+  # Uri (UR)
+  "Uri", "Kanton Uri",
+  # Valais (VS)
+  "Brig", "Bezirk Brig",
+  "D'entremont", "District d'Entremont",
+  "D'hérens", "District d'Hérens",
+  "De Conthey", "District de Conthey",
+  "De Martigny", "District de Martigny",
+  "De Monthey", "District de Monthey",
+  "De Saint-Maurice", "District de Saint-Maurice",
+  "De Sierre", "District de Sierre",
+  "De Sion", "District de Sion",
+  "Goms", "Bezirk Goms",
+  "Leuk", "Bezirk Leuk",
+  "Raron", "Bezirk Raron",
+  "Visp", "Bezirk Visp",
+  # Vaud (VD)
+  "D'aigle", "District d'Aigle",
+  "De L'ouest Lausannois", "District de l'Ouest lausannois",
+  "De La Broye-Vully", "District de la Broye-Vully",
+  "De La Riviera-Pays-D'enhaut", "District de la Riviera-Pays-d'Enhaut",
+  "De Lausanne", "District de Lausanne",
+  "De Lavaux-Oron", "District de Lavaux-Oron",
+  "De Morges", "District de Morges",
+  "De Nyon", "District de Nyon",
+  "Du Gros-De-Vaud", "District du Gros-de-Vaud",
+  "Du Jura-Nord Vaudois", "District du Jura-Nord vaudois",
+  # Zoug (ZG)
+  "Zug", "Kanton Zug",
+  # Zurich (ZH)
+  "Affoltern", "Bezirk Affoltern",
+  "Andelfingen", "Bezirk Andelfingen",
+  "Bülach", "Bezirk Bülach",
+  "Dielsdorf", "Bezirk Dielsdorf",
+  "Dietikon", "Bezirk Dietikon",
+  "Hinwil", "Bezirk Hinwil",
+  "Horgen", "Bezirk Horgen",
+  "Meilen", "Bezirk Meilen",
+  "Pfäffikon", "Bezirk Pfäffikon",
+  "Uster", "Bezirk Uster",
+  "Winterthur", "Bezirk Winterthur",
+  "Zürich", "Bezirk Zürich"
+)
+
+district_key <- district_key |> 
+  left_join(spatial_index) |> 
+  rename(
+    district_agv = HR_HGDE_HIST_L2_Name_fr,
+    geocode_districts = HR_HGDE_HIST_L2,
+    geocode_cantons = HR_HGDE_HIST_L1
+  )
+
+```
+
+```{r}
+
+library(tidylog)
+df_districts_clean <- df_districts |> 
+  filter(!is.na(bev_pop_total)) |> 
+  left_join(district_key)
+
+```
+
+```{r}
+
+df_districts_clean |> 
+  write.csv(file.path(input_processed_dir, "students_entriers_districts.csv"))
+
+```
+
+## Etudiants et entrées série temporelle
+
+```{r}
+
+# Packages
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(purrr)
+
+xlsx_path <- file.path(input_raw_dir, "su-b-15.02.04-he-01.xlsx")
+
+
+# Feuilles cantonales
+skip   <- c("tpl", "Hinweise_Remarques", "Total")
+sheets <- setdiff(excel_sheets(xlsx_path), skip)
+
+# utilitaire: coupe les colonnes entièrement vides à droite
+trim_right <- function(df){
+  keep <- colSums(!is.na(df)) > 0
+  if (!any(keep)) return(df[, 0, drop = FALSE])
+  df[, seq_len(max(which(keep))), drop = FALSE]
+}
+
+# choisit la 1re ou 2e ligne comme entête (celle qui a le plus d'années valides)
+pick_header_idx <- function(df, kind = c("HS","ENT")){
+  kind <- match.arg(kind)
+  pat  <- if (kind == "HS") "^(20\\d{2})\\s*/\\s*(\\d{2})$" else "^(20\\d{2})$"
+  score <- function(v) sum(str_detect(str_squish(as.character(v)), regex(pat)), na.rm = TRUE)
+  s1 <- score(df[1, , drop = TRUE])
+  s2 <- if (nrow(df) >= 2) score(df[2, , drop = TRUE]) else 0
+  if (s2 > s1) 2L else 1L
+}
+
+# lit une plage fixe et renvoie un long format
+read_block <- function(sheet, range, metric, kind){
+  x <- suppressMessages(read_excel(xlsx_path, sheet = sheet, range = range,
+                                   col_names = FALSE, col_types = "text"))
+  if (nrow(x) < 2) return(tibble())
+
+  x <- trim_right(as.data.frame(x, stringsAsFactors = FALSE))
+  if (ncol(x) == 0) return(tibble())
+
+  # 1) détecter la ligne d'entête (1 ou 2)
+  hidx <- pick_header_idx(x, kind)
+
+  # 2) récupérer toutes les étiquettes d'entête et filtrer:
+  #    - non vides
+  #    - qui ressemblent à des années
+  hdr_all <- str_squish(as.character(unlist(x[hidx, ], use.names = FALSE)))
+  if (kind == "HS") {
+    keep <- str_detect(hdr_all, "^(20\\d{2})\\s*/\\s*(\\d{2})$")
+  } else {
+    keep <- str_detect(hdr_all, "^(20\\d{2})$")
+  }
+  keep[is.na(keep)] <- FALSE
+  # enlève aussi explicitement les vides/NA
+  keep <- keep & !is.na(hdr_all) & hdr_all != ""
+  if (!any(keep)) return(tibble())     # aucune année valable
+
+  hdr <- hdr_all[keep]                 # années propres
+  # 3) sous-ensemble: colonnes gardées + 3 lignes sous l'entête
+  start <- hidx + 1L
+  end   <- min(nrow(x), start + 2L)    # M, F, Total
+  dat   <- x[start:end, keep, drop = FALSE]
+  if (ncol(dat) == 0 || nrow(dat) == 0) return(tibble())
+
+  # 4) poser des NOMS EXPLICITES (clé du bug)
+  colnames(dat) <- hdr
+
+  # 5) convertir -> long
+  sex_vec <- c("M","F","Total")[seq_len(nrow(dat))]
+  dat_num <- as_tibble(lapply(dat, function(col)
+    suppressWarnings(as.numeric(str_replace(col, "\\s", "")))))
+  dat_num$sex <- sex_vec
+
+  out <- dat_num |>
+    relocate(sex) |>
+    pivot_longer(-sex, names_to = "year_label", values_to = "value") |>
+    mutate(
+      metric = metric,
+      year = if (kind == "HS") {
+        m <- str_match(year_label, "^(20\\d{2})\\s*/\\s*(\\d{2})$")
+        as.integer(ifelse(!is.na(m[,2]), paste0(substr(m[,2], 1, 2), m[,3]), NA))
+      } else {
+        suppressWarnings(as.integer(year_label))
+      },
+      region = sheet
+    ) |>
+    select(region, metric, sex, year, value) |>
+    filter(!is.na(year))
+}
+
+# extraction sur toutes les feuilles, plages FIXES demandées
+df_time <- map_dfr(
+  sheets,
+  ~ bind_rows(
+      read_block(.x, "B5:L9",   metric = "etudiants_HS", kind = "HS"),
+      read_block(.x, "B14:L17",  metric = "entrants",     kind = "ENT")
+    )
+) |>
+  mutate(region = if_else(region == "Ausland-Étranger", "Étranger", region)) |>
+  arrange(region, metric, sex, year)
+
+print(df_time, n = 60)
+
+# Exemple Total
+# df_time_total <- df_time |> filter(sex == "Total")
+
+
+
+
+# Créer le mapping manuel
+mapping <- tibble::tribble(
+  ~region, ~canton,
+  "Aargau", "AG",
+  "AppenzellA.Rh.", "AR",
+  "AppenzellI.Rh.", "AI",
+  "Basel-Landschaft", "BL",
+  "Basel-Stadt", "BS",
+  "Bern–Berne", "BE",
+  "Fribourg–Freiburg", "FR",
+  "Genève", "GE",
+  "Glarus", "GL",
+  "Graubünden–Grigioni–Grischun", "GR",
+  "Jura", "JU",
+  "Luzern", "LU",
+  "Neuchâtel", "NE",
+  "Nidwalden", "NW",
+  "Obwalden", "OW",
+  "Schaffhausen", "SH",
+  "Schwyz", "SZ",
+  "Solothurn", "SO",
+  "St.Gallen", "SG",
+  "Thurgau", "TG",
+  "Ticino", "TI",
+  "Uri", "UR",
+  "Valais–Wallis", "VS",
+  "Vaud", "VD",
+  "Zug", "ZG",
+  "Zürich", "ZH"
+)
+
+# Joindre à ton dataframe
+df_time <- df_time %>%
+  left_join(mapping, by = "region")
+
+
+# # Export
+df_time |> 
+  write.csv(file.path(input_processed_dir, "students_entries_2015_2025_cantons.csv"))
+
+```

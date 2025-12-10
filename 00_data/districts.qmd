@@ -1,0 +1,267 @@
+---
+title: "districts"
+author: "Olaf König"
+format:
+  html:
+    self-contained: true
+    page-layout: full
+    toc: true
+    toc-depth: 4
+    number-sections: true
+    number-depth: 4
+    code-line-numbers: true
+    code-fold: true
+execute:
+  warning: false
+  message: false
+theme: cosmo
+editor: visual
+---
+
+```{r libraries, message=FALSE}
+# Data manipulation
+library(tidyverse)
+library(readr)
+library(readxl)
+
+# Data visualization
+library(ggplot2)
+library(tmap)
+
+# Utility
+library(here)
+library(janitor)
+
+# Custom theme for plots
+theme_set(theme_minimal())
+
+# Disable scientific notation
+options(scipen = 999)
+# # Re-enable scientific notation (default behavior)
+# options(scipen = 0)
+```
+
+```{r setup-paths}
+# Define project paths
+input_raw_dir <- here("input", "raw")
+input_processed_dir <- here("input", "processed") 
+output_dir <- here("output")
+```
+
+## Import des datasets
+
+```{r}
+# Import géométrie
+library(sf)
+library(mapview)
+st_layers(file.path(input_processed_dir, "historisierte-administrative_grenzen_g1_2025-01-01_2056.gpkg"))
+
+sf_district <- read_sf(
+  dsn = file.path(input_processed_dir, "historisierte-administrative_grenzen_g1_2025-01-01_2056.gpkg"),
+  layer = "Districts_G1_20250101"  
+)
+```
+
+```{r}
+
+# Import df issus de Excel
+df_districts <- read.csv(file.path(input_processed_dir, "students_entries_24_25_districts.csv")) |> 
+  select(-X)
+
+# Import PX 18-25 par districts
+px_statpop_18_25_bezk <- read.csv(file.path(input_processed_dir, "px_statpop_18_25_bezk.csv")) |> 
+  filter(annee == 2024) |> 
+  select(BEZNR, sexe, value) |> 
+  pivot_wider(
+    names_from = sexe,
+    values_from = value
+  ) |> 
+    rename(
+      f_18_25 = Femme,
+      h_18_25 = Homme,
+      tot_18_25 = `Sexe - total`
+    )
+
+```
+
+```{r}
+# Création d'un fichier Districts SF
+
+sf_districts_data <- sf_district |> 
+  select(
+    BEZHISTID, BEZNR, BEZNAME, E_CNTR, N_CNTR
+  ) |> 
+    left_join(
+      df_districts, by = c("BEZHISTID" = "geocode_districts")
+    ) |> 
+      left_join(px_statpop_18_25_bezk) |> 
+      mutate(
+        tx_tot_18_25 = stu_et_total / tot_18_25 * 100,
+        tx_h_18_25 = stu_et_h / h_18_25 * 100,
+        tx_f_18_25 = stu_et_f / f_18_25 * 100
+      )
+
+```
+
+## 0. Map
+
+```{r}
+
+tmap_mode("view")
+
+tm_shape(sf_districts_data) +
+  tm_polygons(
+    col = "tx_tot_18_25",
+    palette = "YlOrBr",
+    style = "quantile", n = 5,
+    title = "Étudiants / 100 habitants 18–25 ans"
+  ) +
+  tm_layout(
+    frame = FALSE,
+    legend.outside = TRUE,
+    title = "Taux d'étudiants (18–25 ans) par district"
+  )
+```
+
+```{r}
+hist(sf_districts_data$tx_tot_18_25, breaks = 10,
+     main = "Distribution du taux d'étudiants 18–25 ans",
+     xlab = "Taux (%)")
+```
+
+#### DW Maps
+
+https://app.datawrapper.de/tamedia/edit/VgHcv/visualize#refine
+
+```{r}
+id_canton <- tamMap::canton_CH()  |> 
+  select(
+    order, iso2
+  ) |> 
+    rename(
+      geocode_cantons = order
+    )
+```
+
+```{r}
+
+sf_districts_data |> 
+  st_drop_geometry() |> 
+  DatawRappr::dw_data_to_chart("VgHcv")
+
+```
+
+#### DW table
+
+https://app.datawrapper.de/tamedia/edit/HAX27/upload
+
+```{r}
+sf_districts_data |> 
+  st_drop_geometry() |> 
+    left_join(id_canton) |> 
+  select(
+    district, iso2, pct_f, tx_tot_18_25:tx_f_18_25
+  ) |> 
+  DatawRappr::dw_data_to_chart("HAX27")
+```
+
+### Map Facet with percent of 18-25
+
+```{r}
+library(tidyr)
+tmap_mode("plot")
+
+# Transformer en format long pour les facettes
+sf_districts_long <- sf_districts_data %>%
+  pivot_longer(
+    cols = c(tx_tot_18_25, tx_h_18_25, tx_f_18_25, pct_f),
+    names_to = "type",
+    values_to = "taux"
+  ) %>%
+  mutate(
+    type = factor(type, 
+      levels = c("tx_tot_18_25", "tx_h_18_25", "tx_f_18_25", "pct_f"),
+      labels = c("Total", "Hommes / Männer", "Femmes / Frauen", "Part Femmes")
+    )
+  )
+
+# Carte avec facettes
+tm <- tm_shape(sf_districts_long) +
+  tm_polygons(
+    col = "taux",
+    palette = "YlOrBr",
+    style = "quantile", 
+    n = 5,
+    border.col = "black", 
+    lwd = 0.5,
+    colorNA = "grey90",
+    title = "Taux 18-25 ans (%)",
+    legend.format = list(suffix = "%", digits = 1)
+  ) +
+  tm_facets(
+    by = "type",
+    ncol = 2,
+    free.scales = TRUE  # FALSE = même échelle pour toutes les facettes
+  ) +
+  tm_layout(
+    frame = FALSE,
+    legend.outside = TRUE,
+    legend.title.size = 1.0,
+    legend.text.size = 0.8,
+    main.title = "Taux d'étudiants parmi les 18-25 ans — par district\nStudierendenquote bei 18- bis 25-Jährigen — nach Bezirk",
+    main.title.size = 1.1
+  )
+
+tm
+```
+
+## 1. Quels districts ont le taux de "scolarisation" le plus élevé/faible ?
+
+```{r}
+# Top 10 et bottom 10
+sf_districts_data %>% 
+  select(district, permille_total) %>% 
+  arrange(desc(permille_total)) %>% 
+  slice(c(1:10, (n()-9):n())) 
+```
+
+```{r}
+sf_districts_data %>% 
+  select(district, permille_total) %>% 
+  arrange(desc(permille_total)) %>% 
+  slice(c(1:10, (n()-9):n()))  |> 
+  mapview(zcol = "permille_total")
+```
+
+### Commentaires
+
+Le district de Meilen, l'arc lémanique ressortent le plus, à l'exception de Renens (ouest-lausannois). La Suisse romande et italienne ont des valeurs un peu plus haute.
+
+**1. Les districts très “éduqués” : Meilen, Lavaux-Oron, Nyon, Höfe, Morges:** Les valeurs tx_tot_18_25 dépassent 25–33%, ce qui est très above average (la plupart des districts suisses sont plutôt entre 10 et 18%). Profils typiques : zones urbaines ou périurbaines aisées, très connectées à l’emploi qualifié (p.ex. Meilen/Höfe autour du lac de Zurich) + pôles académiques (Lausanne, Genève) + zones internationales (Nyon). **Les femmes y surpassent systématiquement les hommes en taux d’études.** C’est un pattern suisse désormais très marqué : dans les zones très qualifiées, l’avantage féminin dans les études tertiaires est net.
+
+**2. Les districts à faibles taux d’études 18–25 ans : montagne, périphéries, zones industrielles** Ce sont typiquement des régions : • rurales / alpines • avec économie plus manuelle / artisanale / agricole • où les jeunes s’orientent plus tôt vers apprentissages et moins vers études tertiaires
+
+Le différentiel hommes–femmes y est souvent faible : les deux sexes ont des taux faibles, parfois même les hommes légèrement en dessous.
+
+**3. Un pattern général très clair en Suisse : les femmes étudient plus que les hommes**
+
+```         
+•   Sense (FR) : 19.49% (f) vs 11.99% (h)
+•   Riviera-Pays-d’Enhaut (VD) : 22.4% vs 16.0%
+•   Rheinfelden (AG) : 19.7% vs 12.4%
+•   Riviera (TI) : 16.46% vs 8.13%
+```
+
+Interprétation possible : • Les hommes s’orientent proportionnellement plus vers apprentissages techniques (CFC → formation duale). • Les femmes poursuivent plus souvent dans les filières tertiaires (HES, uni), particulièrement dans les régions urbaines ou aisées.
+
+Ce n’est donc pas une question de composition démographique, mais principalement : • du niveau d’urbanisation, • de la structure économique locale, • et des opportunités éducatives.
+
+**4. Les centres urbains ont moins que leur périphérie riche... Genève, Lausanne, Zürich : des profils différents** • Genève : tx_tot ≈ 21.7% — très élevé et assez équilibré (h 18.8, f 24.6) • Lausanne : tx_tot ≈ 18.3% — un peu moins que Genève malgré l’UNIL/EPFL (effet de forte population ouvrière/immigrée) L’effet “centre urbain populaire” réduit le taux d’études, contrairement aux banlieues aisées où les taux explosent.
+
+**5. Les districts autour :** • du lac de Zurich • de Lausanne/Morges/Lavaux • de Nyon/Genève
+
+sont systématiquement dans le top national, alors que : • l’Arc jurassien • les Alpes valaisannes • la Suisse orientale rurale
+
+sont plutôt bas.
+
+Ce gradient métropole → rural est un des plus nets de Suisse.

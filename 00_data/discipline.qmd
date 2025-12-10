@@ -1,0 +1,492 @@
+---
+title: "discipline"
+author: "Olaf König"
+format:
+  html:
+    self-contained: true
+    page-layout: full
+    toc: true
+    toc-depth: 4
+    number-sections: true
+    number-depth: 4
+    code-line-numbers: true
+    code-fold: true
+execute:
+  warning: false
+  message: false
+theme: cosmo
+editor: visual
+---
+
+```{r libraries, message=FALSE}
+# Data manipulation
+library(tidyverse)
+library(readr)
+library(readxl)
+
+# Data visualization
+library(ggplot2)
+
+# Utility
+library(here)
+library(janitor)
+
+# Custom theme for plots
+theme_set(theme_minimal())
+
+# Disable scientific notation
+options(scipen = 999)
+# # Re-enable scientific notation (default behavior)
+# options(scipen = 0)
+```
+
+```{r setup-paths}
+# Define project paths
+input_raw_dir <- here("input", "raw")
+input_processed_dir <- here("input", "processed") 
+output_dir <- here("output")
+```
+
+## Import des datasets
+
+```{r}
+library(sf)
+library(mapview)
+st_layers(file.path(input_processed_dir, "historisierte-administrative_grenzen_g1_2025-01-01_2056.gpkg"))
+
+
+sf_lakes <- read_sf(
+  dsn = file.path(input_processed_dir, "historisierte-administrative_grenzen_g1_2025-01-01_2056.gpkg"),
+  layer = "Lacs_G1_20250101"  
+)
+
+sf_canton_original <- read_sf(
+  dsn = file.path(input_processed_dir, "historisierte-administrative_grenzen_g1_2025-01-01_2056.gpkg"),
+  layer = "Cantons_G1_20250101"  
+)  |> 
+  select(1:2)
+
+# Soustraction des lacs
+sf_canton <- rmapshaper::ms_erase(sf_canton_original, sf_lakes)
+
+```
+
+```{r}
+df_discipline <- read.csv(file.path(input_processed_dir, "students_entries_spectialities_24_25_cantons.csv")) |> 
+  select(-X)
+```
+
+## 0. Ratio diplomes / étudiants
+
+```{r}
+
+df_ratio <- df_discipline %>%
+  filter(domaine == "TOTAL", !institution %in% c("Total")) %>%
+  filter(metric %in% c("etudiants_automne", "diplomes")) %>%
+  group_by(institution, metric) %>%
+  summarise(total = sum(valeur, na.rm = TRUE), .groups = "drop") %>%
+  tidyr::pivot_wider(
+    names_from = metric,
+    values_from = total,
+    names_prefix = "total_"
+  ) %>%
+  mutate(
+    ratio = total_diplomes / total_etudiants_automne * 100
+  ) %>%
+  arrange(desc(ratio))
+
+top_n_insitutions <- df_ratio  |>
+  slice_max(total_etudiants_automne, n = 8) |> 
+  pull(institution)
+
+```
+
+## 1. Mobilité étudiante par canton
+
+```{r}
+df_discipline %>%
+  filter(metric == "etudiants_automne", domaine == "TOTAL", !institution == "Total") |> 
+  group_by(region) %>%
+  mutate(pct = valeur / sum(valeur) * 100) %>%
+  arrange(region, desc(pct))
+```
+
+### Map
+
+```{r}
+# Packages
+library(tmap)
+library(classInt)
+
+# ---- Paramètres ---------------------------------------------------------
+inst_sel <- top_n_insitutions              # ton vecteur
+canton_code_col <- "KTKZ"                  # code à 2 lettres dans sf_canton
+max_bubble_size <- 100                     # rayon max relatif (ajuste selon rendu)
+
+# ---- 1) % par canton + effectifs absolus -------------------------------
+df_pct <- df_discipline %>%
+  filter(metric == "etudiants_automne",
+         domaine == "TOTAL",
+         !institution %in% c("Total")) %>%
+  group_by(region) %>%
+  mutate(pct = 100 * valeur / sum(valeur)) %>%
+  ungroup() %>%
+  transmute(
+    canton = canton,            # code (AG, ZH, …)
+    region = region,            # libellé
+    institution = institution,
+    n_etudiants = valeur,       # ABSOLU pour la taille du cercle
+    pct = pct                   # % pour la couleur
+  ) %>%
+  filter(institution %in% inst_sel)
+
+# ---- 2) Jointure aux cantons + centroids pour les bulles ---------------
+sf_map <- sf_canton %>%
+  rename(canton = all_of(canton_code_col)) %>%
+  left_join(df_pct, by = "canton") %>%
+  mutate(
+    n_etudiants = ifelse(is.na(n_etudiants), 0, n_etudiants),
+    pct = ifelse(is.na(pct), 0, pct)
+  )
+
+# Centroids robustes (un point garanti à l’intérieur)
+sf_pts <- sf_map %>% st_point_on_surface()
+
+# ---- 3) Échelles communes (couleurs + tailles) -------------------------
+# Breaks de couleur fixés globalement (quantiles sur tout le jeu)
+brks <- classInt::classIntervals(sf_map$pct, n = 5, style = "quantile")$brks
+
+# Échelle de tailles globale (racine carrée pour que l’aire ~ effectif)
+# On normalise entre 0 et max_bubble_size
+max_n <- max(sf_map$n_etudiants, na.rm = TRUE)
+size_scale <- function(x) ifelse(x > 0, max_bubble_size * sqrt(x / max_n), 0)
+
+sf_pts$size <- size_scale(sf_pts$n_etudiants)
+
+# ---- 4) Carte facettée --------------------------------------------------
+tmap_mode("plot")
+# tmap_mode("view") #interactif
+
+tm_shape(sf_map) +
+  # Fond optionnel très léger (peut être retiré si tu veux bulles seules)
+  tm_polygons(col = "#F5F5F5", border.col = "grey75", lwd = 0.3) +
+
+  # Cercles proportionnels colorés
+  tm_shape(sf_pts) +
+  tm_symbols(
+    size = "size",                         # taille pré-calculée
+    col = "pct",                           # couleur = %
+    palette = "Blues",
+    breaks = brks,
+    border.col = "grey30",
+    alpha = 0.9,
+    legend.col.show = TRUE,
+    legend.size.show = TRUE
+  ) +
+
+  # Facettes par institution
+  tm_facets(by = "institution", ncol = 3, free.scales = FALSE) +
+
+  # Légendes & mise en page
+  tm_layout(
+    main.title = "Part des étudiants par canton — Small multiples (cercles proportionnels)",
+    frame = FALSE,
+    legend.outside = TRUE,
+    legend.stack = "vertical",
+    legend.title.size = 0.9,
+    legend.text.size = 0.7,
+    panel.label.size = 0.9,
+    panel.label.bg.color = "white",
+    panel.label.height = 1.2
+  ) # +
+  # Étiquettes des cantons si utile :
+  # tm_text("region", size = 0.5)
+  # tm_scale_bar(position = c("left", "bottom"))
+
+```
+
+### Map alternative choropolèthe "pure"
+
+```{r}
+# Packages
+library(tmap)
+
+# ---- Paramètres ---------------------------------------------------------
+inst_sel <- top_n_insitutions
+canton_code_col <- "KTKZ"
+
+# ---- 1) % par canton ----------------------------------------------------
+df_pct <- df_discipline %>%
+  filter(metric == "etudiants_automne",
+         domaine == "TOTAL",
+         !institution %in% c("Total")) %>%
+  group_by(region) %>%
+  mutate(pct = 100 * valeur / sum(valeur)) %>%
+  ungroup() %>%
+  transmute(
+    canton = canton,
+    institution = institution,
+    pct = pct
+  ) %>%
+  filter(institution %in% inst_sel)
+
+# ---- 2) Jointure ---------------------------------------------------------
+sf_map <- sf_canton %>%
+  rename(canton = all_of(canton_code_col)) %>%
+  left_join(df_pct, by = "canton") %>%
+  mutate(pct = ifelse(is.na(pct), 0, pct))
+
+# ---- 3) Classes fixes de 5% ---------------------------------------------
+max_pct <- max(sf_map$pct, na.rm = TRUE)
+breaks <- seq(0, 30, by = 5)
+
+# ---- 4) Carte choroplèthe facettée --------------------------------------
+tmap_mode("plot")
+
+tm_shape(sf_map) +
+  tm_polygons(
+    col = "pct",
+    breaks = breaks,
+    palette = "Blues",
+    border.col = "grey40",
+    lwd = 0.5,
+    title = "Part (%)",
+    legend.hist = FALSE
+  ) +
+  tm_facets(by = "institution", ncol = 3, free.scales = FALSE) +
+  tm_layout(
+    main.title = "Part des étudiants par canton et institution",
+    frame = FALSE,
+    legend.outside = TRUE,
+    legend.position = c("right", "top"),
+    panel.label.size = 0.9,
+    panel.label.bg.color = "white"
+  )
+```
+
+## Spécialisation des cantons par domaine
+
+```{r}
+df_discipline %>%
+  filter(metric == "etudiants_automne", domaine != "TOTAL", institution == "Total") %>%
+  group_by(region) %>%
+  mutate(pct_domaine = valeur / sum(valeur) * 100)
+```
+
+### Préparation
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(forcats)
+library(ggplot2)
+library(stringr)
+library(scales)
+
+# Point de départ : votre tibble (df_discipline)
+base <- df_discipline %>%
+  filter(metric == "etudiants_automne",
+         domaine != "TOTAL",
+         institution == "Total") %>%
+  group_by(region) %>%
+  mutate(pct_domaine = valeur / sum(valeur) * 100) %>%
+  ungroup()
+
+# Référence nationale par domaine (parts %)
+nat <- base %>%
+  group_by(domaine) %>%
+  summarise(n = sum(valeur), .groups = "drop") %>%
+  mutate(pct_ch = 100 * n / sum(n)) %>%
+  select(-n)
+
+nat_ch_only <- base %>%
+  filter(!canton == "ZZ")  |> 
+  group_by(domaine) %>%
+  summarise(n = sum(valeur), .groups = "drop") %>%
+  mutate(pct_ch_only = 100 * n / sum(n)) %>%
+  select(-n)
+
+# Écarts région vs. national (les deux références)
+cmp <- base %>%
+  left_join(nat, by = "domaine") %>%
+  left_join(nat_ch_only, by = "domaine") %>%
+  mutate(
+    diff_pct = pct_domaine - pct_ch,           # écart vs. CH total
+    diff_pct_ch_only = pct_domaine - pct_ch_only  # écart vs. CH sans ZZ
+  )
+
+# Intensité de disparité (tu peux choisir laquelle utiliser)
+ordre_regions <- cmp %>%
+  group_by(region) %>%
+  summarise(dispersion = sum(abs(diff_pct)), .groups = "drop") %>%
+  arrange(desc(dispersion)) %>%
+  pull(region)
+
+```
+
+### Carte thermique des écarts (vue globale rapide)
+
+```{r}
+p_heat <- cmp %>%
+  mutate(region = factor(region, levels = ordre_regions),
+         domaine = fct_reorder(domaine, pct_ch)) %>%  # domaines triés par poids national
+  ggplot(aes(x = domaine, y = region, fill = diff_pct_ch_only)) +
+  geom_tile() +
+  scale_fill_gradient2(
+    name = "Écart à la moyenne nationale (points de %)\nAbw. vom Landesdurchschnitt (Prozentpunkte)",
+    low = muted("blue"), mid = "white", high = muted("red"),
+    midpoint = 0, labels = number_format(accuracy = 0.1, decimal.mark = ",")
+  ) +
+  labs(
+    title = "Disparités régionales par domaine / Regionale Unterschiede nach Fachbereich",
+    subtitle = "Rouge = surreprésenté | Blau = unterrepräsentiert",
+    x = "Domaine / Fachbereich",
+    y = "Région / Region"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    axis.text.x = element_text(angle = 40, hjust = 1),
+    legend.position = "bottom",
+    panel.grid = element_blank()
+  )
+p_heat
+```
+
+#### DW Heatmap Specialisation
+
+https://app.datawrapper.de/tamedia/edit/bD1Qk/upload
+
+```{r}
+dw_cmp <- cmp  |> 
+  select(domaine,canton,diff_pct_ch_only) |> 
+  pivot_wider(
+    names_from = domaine,
+    values_from = diff_pct_ch_only
+  )
+
+dw_cmp |> 
+  DatawRappr::dw_data_to_chart("bD1Qk")
+
+```
+
+### Profils « top+/top- » par région
+
+```{r}
+topbot <- cmp %>%
+  group_by(region) %>%
+  slice_max(diff_pct, n = 3, with_ties = FALSE) %>%
+  bind_rows(
+    cmp %>%
+      group_by(region) %>%
+      slice_min(diff_pct, n = 3, with_ties = FALSE)
+  ) %>%
+  ungroup()
+
+p_lolli <- topbot %>%
+  mutate(region = factor(region, levels = ordre_regions),
+         domaine = fct_reorder(domaine, diff_pct)) %>%
+  ggplot(aes(x = diff_pct, y = domaine)) +
+  geom_vline(xintercept = 0, linewidth = 0.3) +
+  geom_point(size = 2) +
+  geom_segment(aes(x = 0, xend = diff_pct, y = domaine, yend = domaine), linewidth = 0.6) +
+  facet_wrap(~ region, scales = "free_y", ncol = 2) +  # 2 colonnes = bon rendu mobile
+  scale_x_continuous(labels = function(x) paste0(x, "%")) +
+  labs(
+    title = "Profils régionaux : domaines sur/sous-représentés\nRegionale Profile: Über-/Unterrepräsentation",
+    x = "Écart en points de % / Abweichung in Prozentpunkten",
+    y = NULL
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    legend.position = "none",
+    panel.grid.major.y = element_blank(),
+    strip.text = element_text(face = "bold")
+  )
+p_lolli
+```
+
+### « Score de spécialisation » (z-score intra-domaine)
+
+```{r}
+zview <- base %>%
+  group_by(domaine) %>%
+  mutate(z = as.numeric(scale(pct_domaine))) %>%  # moyenne=0, écart-type=1 dans chaque domaine
+  ungroup()
+
+# Agrégat par région (intensité de spécialisation)
+ordre_regions_z <- zview %>%
+  group_by(region) %>%
+  summarise(intensite = mean(abs(z)), .groups = "drop") %>%
+  arrange(desc(intensite)) %>%
+  pull(region)
+
+p_z <- zview %>%
+  mutate(region = factor(region, levels = ordre_regions_z),
+         domaine = fct_reorder(domaine, -abs(z), .fun = median)) %>%
+  ggplot(aes(x = domaine, y = region, fill = z)) +
+  geom_tile() +
+  scale_fill_gradient2(
+    name = "Spécialisation (z)\nSpezialisierung (z)",
+    low = muted("blue"), mid = "white", high = muted("red"), midpoint = 0
+  ) +
+  labs(
+    title = "Spécialisation relative des régions par domaine\nRelative Spezialisierung der Regionen nach Fachbereich",
+    subtitle = "z > 0 : au-dessus de la moyenne | z < 0 : darunter",
+    x = "Domaine / Fachbereich",
+    y = "Région / Region"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    axis.text.x = element_text(angle = 40, hjust = 1),
+    legend.position = "bottom",
+    panel.grid = element_blank()
+  )
+p_z
+```
+
+### Variante « profil détaillé » à la demande
+
+```{r}
+plot_region_profile <- function(nom_region, n = 10) {
+  cmp %>%
+    filter(region == nom_region) %>%
+    mutate(domaine = fct_reorder(domaine, diff_pct)) %>%
+    arrange(desc(diff_pct)) %>%
+    slice_head(n = n) %>%
+    ggplot(aes(x = diff_pct, y = domaine)) +
+    geom_vline(xintercept = 0, linewidth = 0.3) +
+    geom_point(size = 2) +
+    geom_segment(aes(x = 0, xend = diff_pct, y = domaine, yend = domaine), linewidth = 0.6) +
+    scale_x_continuous(labels = function(x) paste0(x, "%")) +
+    labs(
+      title = paste0("Profil de ", nom_region, " vs CH / Profil ", nom_region, " vs CH"),
+      x = "Écart en points de % / Abweichung in Prozentpunkten",
+      y = NULL
+    ) +
+    theme_minimal(base_size = 11) +
+    theme(panel.grid.major.y = element_blank())
+}
+
+# Exemple :
+plot_region_profile("Bern–Berne", n = 12)
+```
+
+## Attractivité des institutions
+
+```{r}
+df_discipline %>%
+  filter(metric == "etudiants_automne", domaine == "TOTAL", 
+         institution %in% c("EPFL", "ETHZ", "Université de Genève", "Université de Lausanne")) |> 
+          view()
+```
+
+**Commentaires**
+
+```         
+•   Une polarisation nette entre cantons à dominante SHS/économie (latins + certains cantons non universitaires) et cantons STEM (ZG, ZH, SZ, TG, GR, AI).
+•   Les étudiants étrangers suivent un schéma propre, quasi opposé aux cantons latins → ils surreprésentent fortement les STEM.
+•   Certains cantons affichent des profils vraiment singuliers, notamment JU, GE, BL, BS, TI.
+•   Le cas ZZ explique une partie de la coloration STEM nationale observée fréquemment dans les statistiques fédérales
+```
+
+STEM: Science — Technology — Engineering — Mathematics

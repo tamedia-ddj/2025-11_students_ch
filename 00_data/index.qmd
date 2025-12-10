@@ -1,0 +1,9 @@
+---
+title: "Rapports étudiants 2025"
+---
+
+Bienvenue dans le tableau de bord des analyses.
+
+- [Discipline](discipline.qmd)
+- [Districts](districts.qmd)
+- [Évolution](evolution.qmd)

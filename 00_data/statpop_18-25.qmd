@@ -1,0 +1,172 @@
+---
+title: "bfs_population"
+author: "Olaf König"
+format:
+  html:
+    self-contained: true
+    page-layout: full
+    toc: true
+    toc-depth: 4
+    number-sections: true
+    number-depth: 4
+    code-line-numbers: true
+    code-fold: true
+execute:
+  warning: false
+  message: false
+theme: cosmo
+editor: visual
+---
+
+### Import tables from cubes
+
+https://www.pxweb.bfs.admin.ch/pxweb/fr/px-x-0102010000_101/-/px-x-0102010000_101.px/table/tableViewLayout2/
+
+```{r}
+
+get_px <- function(url, chemin_local, nom_fichier) {
+  # Construire le chemin complet pour le fichier local
+  chemin_complet <- file.path(chemin_local, nom_fichier)
+  
+  # Créer le répertoire local s'il n'existe pas
+  if (!dir.exists(chemin_local)) {
+    dir.create(chemin_local, recursive = TRUE)
+  }
+  
+  # Télécharger le fichier depuis l'URL et l'enregistrer localement
+  download.file(url, destfile = chemin_complet, mode = "wb")
+  
+  # Vérifier si le fichier a été correctement téléchargé
+  if (file.exists(chemin_complet)) {
+    message("Téléchargement réussi : ", chemin_complet)
+    
+    # Lire et convertir l'encodage du fichier en UTF-8
+    lignes <- readLines(chemin_complet, encoding = "Windows-1252")
+    lignes_utf8 <- iconv(lignes, from = "Windows-1252", to = "UTF-8")
+    
+    # Écrire les lignes converties dans le même fichier avec encodage UTF-8
+    writeLines(lignes_utf8, file(chemin_complet, encoding = "UTF-8"))
+    message("Encodage converti en UTF-8.")
+    
+  } else {
+    message("Échec du téléchargement.")
+  }
+}
+
+
+
+
+#------------- Utilisation de la fonction------------
+# url <- "https://www.pxweb.bfs.admin.ch/sq/96b24b91-a35a-483f-8c4a-5d297b5ad14d"
+# chemin_local <- "input"
+# nom_fichier <- "px_statpop_18_25_ans.csv"
+
+# get_px(url, chemin_local, nom_fichier)
+
+px_statpop_18_25 <- read_csv(file.path(chemin_local, nom_fichier))  |>  
+  janitor::clean_names()
+
+```
+
+### Import spatial index
+
+```{r}
+
+# Requete des niveaux géographiques
+get_geolevel <- function(date1){
+  url <- str_c("https://sms.bfs.admin.ch/WcfBFSSpecificService.svc/AnonymousRest/communes/levels?startPeriod=",date1,"&endPeriod=",date1,"&useBfsCode=false&labelLanguages=fr&format=csv")
+  result <- read_csv(url)
+}
+
+spatial_index <- get_geolevel("31-12-2024")
+```
+
+```{r}
+spatial_index_select <- spatial_index |> 
+  select(CODE_OFS, Name_fr, HR_HGDE_HIST_L1, HR_HGDE_HIST_L2, HR_HGDE_HIST_L2_Name_fr)
+```
+
+```{r}
+st_layers(file.path(input_processed_dir, "historisierte-administrative_grenzen_g1_2025-01-01_2056.gpkg"))
+
+sf_district <- read_sf(
+  dsn = file.path(input_processed_dir, "historisierte-administrative_grenzen_g1_2025-01-01_2056.gpkg"),
+  layer = "Districts_G1_20250101"  
+)
+```
+
+### Clean the cube
+
+```{r}
+# Extraire les géocodes
+px_statpop_18_25_clean <- px_statpop_18_25 %>%
+  mutate(CODE_OFS = as.integer(str_extract(canton_district_commune, "\\d+"))) |> 
+  left_join(spatial_index_select) |> 
+  pivot_longer(
+    cols = x18_ans:x25_ans,
+    names_to = "age",
+    values_to = "value"
+  )
+```
+
+### Agregation on districts
+
+```{r}
+px_statpop_18_25_bezk <- px_statpop_18_25_clean |> 
+  group_by(annee, HR_HGDE_HIST_L2, HR_HGDE_HIST_L2_Name_fr, sexe) |> 
+  summarise(
+    value = sum(value, na.rm = TRUE)
+  )
+```
+
+```{r}
+# Districts keys
+df_district_key <- sf_district |> 
+  st_drop_geometry() |> 
+  select(
+    BEZHISTID, BEZNR, BEZNAME
+  )
+
+```
+
+```{r}
+library(tidylog)
+px_statpop_18_25_bezk_clean <- px_statpop_18_25_bezk |> 
+  left_join(
+   df_district_key, by = c("HR_HGDE_HIST_L2" = "BEZHISTID") 
+  )
+  
+```
+
+```{r}
+missing_ids <- setdiff(
+  px_statpop_18_25_bezk$HR_HGDE_HIST_L2,
+  df_district_key$BEZHISTID
+)
+```
+
+```{r}
+# Check St-Gallen et totaux nationaux... on enlève ce double comptage de merde !!!!
+
+px_statpop_18_25_bezk_clean |> 
+  filter(sexe == "Sexe - total") |>  
+  filter(!is.na(HR_HGDE_HIST_L2_Name_fr)) |> 
+  group_by(annee) |> 
+  summarise(sum = sum(value, na.rm = TRUE))
+
+
+px_statpop_18_25_bezk_clean |> 
+  filter(sexe == "Sexe - total") |>  
+    filter(!is.na(HR_HGDE_HIST_L2_Name_fr)) |> 
+  group_by(annee) |> 
+  summarise(sum = sum(value, na.rm = TRUE))
+
+```
+
+### Export dataset
+
+```{r}
+px_statpop_18_25_bezk_clean |> 
+  filter(!is.na(HR_HGDE_HIST_L2_Name_fr)) |> 
+  write.csv(file.path(input_processed_dir, "px_statpop_18_25_bezk.csv"))
+```
