@@ -1,0 +1,621 @@
+---
+title: "prod_analysis"
+author: "Olaf König"
+format:
+  html:
+    self-contained: true
+    page-layout: full
+    toc: true
+    toc-depth: 4
+    number-sections: true
+    number-depth: 4
+    code-line-numbers: true
+    code-fold: true
+execute:
+  warning: false
+  message: false
+theme: cosmo
+editor: visual
+---
+
+```{r libraries, message=FALSE}
+# Data manipulation
+library(tidyverse)
+library(readr)
+library(readxl)
+
+# Data visualization
+library(ggplot2)
+library(DatawRappr)
+library(ggrepel)
+library(knitr)
+
+# Utility
+library(here)
+library(janitor)
+
+# Custom theme for plots
+theme_set(theme_minimal())
+
+# Disable scientific notation
+options(scipen = 999)
+# # Re-enable scientific notation (default behavior)
+# options(scipen = 0)
+
+# Define project paths
+input_raw_dir <- here("input", "raw")
+input_processed_dir <- here("input", "processed") 
+output_dir <- here("output")
+
+```
+
+## Import des datasets
+
+```{r}
+library(sf)
+library(mapview)
+st_layers(file.path(input_processed_dir, "historisierte-administrative_grenzen_g1_2025-01-01_2056.gpkg"))
+
+
+sf_lakes <- read_sf(
+  dsn = file.path(input_processed_dir, "historisierte-administrative_grenzen_g1_2025-01-01_2056.gpkg"),
+  layer = "Lacs_G1_20250101"  
+)
+
+sf_canton_original <- read_sf(
+  dsn = file.path(input_processed_dir, "historisierte-administrative_grenzen_g1_2025-01-01_2056.gpkg"),
+  layer = "Cantons_G1_20250101"  
+)  |> 
+  select(1:2)
+
+# Soustraction des lacs
+sf_canton <- rmapshaper::ms_erase(sf_canton_original, sf_lakes)
+
+```
+
+```{r}
+df_discipline <- read.csv(file.path(input_processed_dir, "students_entries_spectialities_24_25_cantons.csv")) |> 
+  select(-any_of(c("Unnamed: 0", "Unnamed..0", "X")))
+```
+
+## 1. Taux de réussite par canton (sans double comptage)
+
+```{r}
+min_n <- 50
+
+# Macro-régions BFS (Grossregionen) pour une lecture régionale pertinente.
+canton_macroregion <- tribble(
+  ~canton, ~macroregion,
+  "GE", "Région lémanique",
+  "VD", "Région lémanique",
+  "VS", "Région lémanique",
+  "BE", "Espace Mittelland",
+  "FR", "Espace Mittelland",
+  "JU", "Espace Mittelland",
+  "NE", "Espace Mittelland",
+  "SO", "Espace Mittelland",
+  "AG", "Suisse du Nord-Ouest",
+  "BL", "Suisse du Nord-Ouest",
+  "BS", "Suisse du Nord-Ouest",
+  "ZH", "Zurich",
+  "AI", "Suisse orientale",
+  "AR", "Suisse orientale",
+  "GL", "Suisse orientale",
+  "GR", "Suisse orientale",
+  "SG", "Suisse orientale",
+  "SH", "Suisse orientale",
+  "TG", "Suisse orientale",
+  "LU", "Suisse centrale",
+  "NW", "Suisse centrale",
+  "OW", "Suisse centrale",
+  "SZ", "Suisse centrale",
+  "UR", "Suisse centrale",
+  "ZG", "Suisse centrale",
+  "TI", "Tessin"
+)
+
+stopifnot(setequal(
+  sort(unique(df_discipline$canton[df_discipline$canton != "ZZ"])),
+  sort(canton_macroregion$canton)
+))
+
+# Le dataset est en format long et contient des lignes "TOTAL".
+# Pour éviter le double comptage, on définit explicitement 3 grains d'analyse.
+df_canton_total_long <- df_discipline %>% 
+  filter(
+    canton != "ZZ",
+    domaine == "TOTAL",
+    unite == "TOTAL",
+    institution == "Total"
+  )
+
+df_canton_domaine_long <- df_discipline %>% 
+  filter(
+    canton != "ZZ",
+    domaine != "TOTAL",
+    unite == "TOTAL",
+    institution == "Total"
+  )
+
+df_canton_uni_long <- df_discipline %>% 
+  filter(
+    canton != "ZZ",
+    domaine == "TOTAL",
+    unite != "TOTAL",
+    institution != "Total"
+  )
+
+# Contrôles qualité: aucune clé ne doit être dupliquée après filtrage.
+qa_uniqueness <- tibble(
+  niveau = c("canton_total", "canton_x_branche", "canton_x_universite"),
+  dup_keys = c(
+    nrow(df_canton_total_long) - nrow(distinct(df_canton_total_long, canton, region, metric)),
+    nrow(df_canton_domaine_long) - nrow(distinct(df_canton_domaine_long, canton, region, domaine, metric)),
+    nrow(df_canton_uni_long) - nrow(distinct(df_canton_uni_long, canton, region, institution, metric))
+  )
+)
+
+stopifnot(all(qa_uniqueness$dup_keys == 0))
+
+df_cantonal_success_rate <- df_canton_total_long %>% 
+  group_by(canton, region, metric) %>% 
+  summarise(valeur = sum(valeur, na.rm = TRUE), .groups = "drop") %>% 
+  pivot_wider(names_from = metric, values_from = valeur) %>% 
+  left_join(canton_macroregion, by = "canton") %>% 
+  mutate(
+    success_rate = diplomes / etudiants_automne * 100,
+    success_io = diplomes / entrants_automne * 100
+  )
+
+df_cantonal_success_rate_robust <- df_cantonal_success_rate %>% 
+  filter(
+    diplomes >= min_n,
+    entrants_automne >= min_n,
+    etudiants_automne >= min_n
+  )
+
+df_canton_domaine <- df_canton_domaine_long %>% 
+  group_by(canton, region, domaine, metric) %>% 
+  summarise(valeur = sum(valeur, na.rm = TRUE), .groups = "drop") %>% 
+  pivot_wider(names_from = metric, values_from = valeur) %>% 
+  left_join(canton_macroregion, by = "canton") %>% 
+  mutate(
+    success_rate = diplomes / etudiants_automne * 100,
+    success_io = diplomes / entrants_automne * 100
+  )
+
+df_canton_domaine_robust <- df_canton_domaine %>% 
+  filter(
+    diplomes >= min_n,
+    entrants_automne >= min_n,
+    etudiants_automne >= min_n
+  )
+
+df_canton_uni <- df_canton_uni_long %>% 
+  group_by(canton, region, institution, metric) %>% 
+  summarise(valeur = sum(valeur, na.rm = TRUE), .groups = "drop") %>% 
+  pivot_wider(names_from = metric, values_from = valeur) %>% 
+  left_join(canton_macroregion, by = "canton") %>% 
+  mutate(
+    success_rate = diplomes / etudiants_automne * 100,
+    success_io = diplomes / entrants_automne * 100
+  )
+
+df_canton_uni_robust <- df_canton_uni %>% 
+  filter(
+    diplomes >= min_n,
+    entrants_automne >= min_n,
+    etudiants_automne >= min_n
+  )
+
+# Comparaison avec une approche naïve (somme sur toutes les lignes, donc double comptage).
+df_naive_canton <- df_discipline %>% 
+  filter(canton != "ZZ") %>% 
+  group_by(canton, region, metric) %>% 
+  summarise(valeur = sum(valeur, na.rm = TRUE), .groups = "drop") %>% 
+  pivot_wider(names_from = metric, values_from = valeur) %>% 
+  left_join(canton_macroregion, by = "canton")
+
+qa_double_count <- df_cantonal_success_rate %>% 
+  select(canton, region, macroregion, diplomes, etudiants_automne, entrants_automne) %>% 
+  rename_with(~paste0("robust_", .x), c(diplomes, etudiants_automne, entrants_automne)) %>% 
+  left_join(
+    df_naive_canton %>% 
+      rename_with(~paste0("naive_", .x), c(diplomes, etudiants_automne, entrants_automne)),
+    by = c("canton", "region", "macroregion")
+  ) %>% 
+  mutate(
+    inflation_diplomes = naive_diplomes / robust_diplomes,
+    inflation_etudiants = naive_etudiants_automne / robust_etudiants_automne,
+    inflation_entrants = naive_entrants_automne / robust_entrants_automne
+  ) %>% 
+  summarise(
+    inflation_median_diplomes = median(inflation_diplomes, na.rm = TRUE),
+    inflation_median_etudiants = median(inflation_etudiants, na.rm = TRUE),
+    inflation_median_entrants = median(inflation_entrants, na.rm = TRUE)
+  ) %>% 
+  mutate(across(everything(), round, 2))
+```
+
+### Contrôle anti-double comptage
+
+```{r}
+kable(qa_uniqueness, caption = "Contrôle d'unicité des clés après filtrage des lignes TOTAL")
+```
+
+```{r}
+kable(
+  qa_double_count,
+  caption = "Facteur médian d'inflation si on somme naïvement toutes les lignes (double comptage)"
+)
+```
+
+```{r results='asis'}
+infl <- qa_double_count[1, ]
+cat(
+  sprintf(
+    "- En médiane, une somme naïve sur toutes les lignes multiplie les volumes par ~%.1fx (diplômés), ~%.1fx (étudiants) et ~%.1fx (entrants).\n",
+    infl$inflation_median_diplomes,
+    infl$inflation_median_etudiants,
+    infl$inflation_median_entrants
+  )
+)
+```
+
+### Tableau cantonal: volumes et ratios
+
+```{r}
+df_canton_success_table <- df_cantonal_success_rate_robust %>% 
+  transmute(
+    canton,
+    region,
+    macroregion,
+    etudiants_automne,
+    entrants_automne,
+    diplomes,
+    `diplomes_etudiants_pct` = round(success_rate, 2),
+    `diplomes_entrants_pct` = round(success_io, 2)
+  ) %>% 
+  arrange(desc(diplomes_etudiants_pct))
+
+kable(
+  df_canton_success_table,
+  caption = paste0("Taux de réussite par canton (cellules conservées: seuil >= ", min_n, ")")
+)
+```
+
+### Graphiques des deux ratios
+
+```{r}
+ggplot(
+  df_cantonal_success_rate_robust,
+  aes(x = fct_reorder(canton, success_rate), y = success_rate)
+) +
+  geom_col(fill = "#2C7FB8") +
+  coord_flip() +
+  labs(
+    title = paste0("Diplômés / étudiants par canton (cellules >= ", min_n, ")"),
+    x = NULL,
+    y = "Diplômés / étudiants (%)"
+  ) +
+  theme_minimal()
+```
+
+```{r}
+ggplot(
+  df_cantonal_success_rate_robust,
+  aes(x = success_rate, y = success_io, label = canton, size = etudiants_automne, color = macroregion)
+) +
+  geom_point(alpha = 0.85) +
+  ggrepel::geom_text_repel(size = 3, max.overlaps = 25) +
+  labs(
+    title = "Comparaison des deux ratios de réussite",
+    subtitle = "Taille du point = volume total d'étudiants du canton",
+    x = "Diplômés / étudiants (%)",
+    y = "Diplômés / entrants (%)",
+    size = "Étudiants",
+    color = "Macro-région"
+  ) +
+  theme_minimal()
+```
+
+## 2. Différences régionales entre cantons
+
+Macro-régions utilisées: classification BFS (Grossregionen).
+
+**Interprétation des indicateurs** - `diplomes / etudiants_automne`: proxy d'un taux de réussite annuel. - `diplomes / entrants_automne`: rapport stock/flux; peut dépasser 100% car diplômés et entrants ne sont pas la même cohorte.
+
+```{r}
+df_macroregion_summary <- df_cantonal_success_rate_robust %>% 
+  group_by(macroregion) %>% 
+  summarise(
+    cantons = n(),
+    etudiants_automne = sum(etudiants_automne, na.rm = TRUE),
+    entrants_automne = sum(entrants_automne, na.rm = TRUE),
+    diplomes = sum(diplomes, na.rm = TRUE),
+    success_rate_pondere = diplomes / etudiants_automne * 100,
+    success_io_pondere = diplomes / entrants_automne * 100,
+    median_success_rate = median(success_rate, na.rm = TRUE),
+    iqr_success_rate = IQR(success_rate, na.rm = TRUE),
+    sd_success_rate = if_else(n() > 1, sd(success_rate, na.rm = TRUE), 0),
+    .groups = "drop"
+  ) %>% 
+  arrange(desc(success_rate_pondere))
+
+df_canton_vs_region <- df_cantonal_success_rate_robust %>% 
+  left_join(
+    df_macroregion_summary %>% 
+      select(macroregion, success_rate_pondere, success_io_pondere),
+    by = "macroregion"
+  ) %>% 
+  mutate(
+    gap_rate_region_pp = success_rate - success_rate_pondere,
+    gap_io_region_pp = success_io - success_io_pondere
+  )
+
+df_extremes_region_gap <- bind_rows(
+  df_canton_vs_region %>% arrange(desc(gap_rate_region_pp)) %>% slice_head(n = 6),
+  df_canton_vs_region %>% arrange(gap_rate_region_pp) %>% slice_head(n = 6)
+) %>% 
+  select(canton, region, macroregion, etudiants_automne, success_rate, success_rate_pondere, gap_rate_region_pp, success_io, gap_io_region_pp) %>% 
+  mutate(
+    across(c(success_rate, success_rate_pondere, gap_rate_region_pp, success_io, gap_io_region_pp), round, 2)
+  )
+```
+
+### Lecture régionale: niveaux et dispersion
+
+```{r}
+kable(
+  df_macroregion_summary %>% 
+    mutate(across(c(success_rate_pondere, success_io_pondere, median_success_rate, iqr_success_rate, sd_success_rate), round, 2)),
+  caption = "Synthèse par macro-région BFS (pondérée par volume étudiant)"
+)
+```
+
+### Cantons au-dessus / en-dessous de leur moyenne régionale
+
+```{r}
+kable(
+  df_extremes_region_gap,
+  caption = "Top 6 / Bottom 6 des écarts cantonaux à la moyenne de leur région (points de %)"
+)
+```
+
+```{r}
+ggplot(
+  df_canton_vs_region,
+  aes(x = fct_reorder(canton, gap_rate_region_pp), y = gap_rate_region_pp, fill = macroregion)
+) +
+  geom_col() +
+  geom_hline(yintercept = 0, linetype = 2, color = "grey40") +
+  coord_flip() +
+  labs(
+    title = "Écart du canton à son taux régional (diplômés / étudiants)",
+    x = NULL,
+    y = "Écart à la macro-région (points de %)",
+    fill = "Macro-région"
+  ) +
+  theme_minimal()
+```
+
+### Points saillants
+
+```{r results='asis'}
+top_macro <- df_macroregion_summary %>% slice_max(success_rate_pondere, n = 1)
+bottom_macro <- df_macroregion_summary %>% slice_min(success_rate_pondere, n = 1)
+widest_disp <- df_macroregion_summary %>% slice_max(iqr_success_rate, n = 1)
+top_canton_gap <- df_canton_vs_region %>% slice_max(gap_rate_region_pp, n = 1)
+bottom_canton_gap <- df_canton_vs_region %>% slice_min(gap_rate_region_pp, n = 1)
+
+cat(sprintf("- Macro-région la plus élevée (diplômés/étudiants): **%s** (%.2f%%).\n", top_macro$macroregion, top_macro$success_rate_pondere))
+cat(sprintf("- Macro-région la plus basse: **%s** (%.2f%%).\n", bottom_macro$macroregion, bottom_macro$success_rate_pondere))
+cat(sprintf("- Dispersion intra-macro-région la plus forte (IQR): **%s** (%.2f points).\n", widest_disp$macroregion, widest_disp$iqr_success_rate))
+cat(sprintf("- Plus forte surperformance cantonale vs sa macro-région: **%s** (%+.2f points).\n", top_canton_gap$canton, top_canton_gap$gap_rate_region_pp))
+cat(sprintf("- Plus forte sous-performance cantonale vs sa macro-région: **%s** (%+.2f points).\n", bottom_canton_gap$canton, bottom_canton_gap$gap_rate_region_pp))
+```
+
+### Vérification de couverture
+
+```{r}
+coverage_tbl <- tibble(
+  niveau = c("cantons", "canton x branche", "canton x université"),
+  cellules = c(
+    nrow(df_cantonal_success_rate_robust),
+    nrow(df_canton_domaine_robust),
+    nrow(df_canton_uni_robust)
+  )
+)
+
+kable(coverage_tbl, caption = paste0("Nombre de cellules conservées avec seuil >= ", min_n))
+```
+
+## 3. Décomposition par branche (mix vs performance)
+
+```{r}
+branch_benchmark <- df_canton_domaine_robust %>% 
+  group_by(domaine) %>% 
+  summarise(
+    branch_rate = sum(diplomes, na.rm = TRUE) / sum(etudiants_automne, na.rm = TRUE) * 100,
+    .groups = "drop"
+  )
+
+national_rate_branch <- df_canton_domaine_robust %>% 
+  summarise(rate = sum(diplomes, na.rm = TRUE) / sum(etudiants_automne, na.rm = TRUE) * 100) %>% 
+  pull(rate)
+
+df_canton_branch_decomp <- df_canton_domaine_robust %>% 
+  left_join(branch_benchmark, by = "domaine") %>% 
+  group_by(canton, region) %>% 
+  summarise(
+    actual_rate = sum(diplomes, na.rm = TRUE) / sum(etudiants_automne, na.rm = TRUE) * 100,
+    expected_mix_rate = sum((etudiants_automne / sum(etudiants_automne, na.rm = TRUE)) * branch_rate, na.rm = TRUE),
+    .groups = "drop"
+  ) %>% 
+  mutate(
+    total_gap_pp = actual_rate - national_rate_branch,
+    mix_effect_pp = expected_mix_rate - national_rate_branch,
+    within_effect_pp = actual_rate - expected_mix_rate
+  ) %>% 
+  arrange(desc(total_gap_pp))
+```
+
+### Quels cantons sur/sous-performent à mix de branches comparable
+
+```{r}
+decomp_top_bottom <- bind_rows(
+  df_canton_branch_decomp %>% arrange(desc(within_effect_pp)) %>% slice_head(n = 5),
+  df_canton_branch_decomp %>% arrange(within_effect_pp) %>% slice_head(n = 5)
+) %>% 
+  mutate(across(c(actual_rate, expected_mix_rate, total_gap_pp, mix_effect_pp, within_effect_pp), round, 2))
+
+kable(
+  decomp_top_bottom %>% select(canton, region, actual_rate, expected_mix_rate, mix_effect_pp, within_effect_pp),
+  caption = "Top/Bottom 5 de l'effet performance interne (points de %)"
+)
+```
+
+```{r}
+ggplot(
+  df_canton_branch_decomp,
+  aes(x = mix_effect_pp, y = within_effect_pp, label = canton)
+) +
+  geom_hline(yintercept = 0, linetype = 2, color = "grey50") +
+  geom_vline(xintercept = 0, linetype = 2, color = "grey50") +
+  geom_point(size = 2.2, alpha = 0.9) +
+  ggrepel::geom_text_repel(size = 3) +
+  labs(
+    title = "Décomposition de l'écart au taux national (branche)",
+    subtitle = "X = effet composition des branches, Y = effet performance interne",
+    x = "Effet mix de branches (points de %)",
+    y = "Effet performance interne (points de %)"
+  ) +
+  theme_minimal()
+```
+
+### Heatmap canton x branche (écart au benchmark de branche)
+
+```{r}
+top_cantons_branch <- df_canton_domaine_robust %>% 
+  group_by(canton) %>% 
+  summarise(etudiants = sum(etudiants_automne, na.rm = TRUE), .groups = "drop") %>% 
+  slice_max(order_by = etudiants, n = 12, with_ties = FALSE) %>% 
+  pull(canton)
+
+df_branch_delta <- df_canton_domaine_robust %>% 
+  left_join(branch_benchmark, by = "domaine") %>% 
+  filter(canton %in% top_cantons_branch) %>% 
+  mutate(delta_pp = success_rate - branch_rate)
+
+ggplot(
+  df_branch_delta,
+  aes(x = domaine, y = fct_reorder(canton, success_rate, .fun = mean), fill = delta_pp)
+) +
+  geom_tile(color = "white") +
+  scale_fill_gradient2(low = "#2166ac", mid = "white", high = "#b2182b", midpoint = 0) +
+  labs(
+    title = "Écart au taux national de la branche (12 cantons les plus grands)",
+    x = NULL,
+    y = NULL,
+    fill = "Écart (pp)"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 35, hjust = 1))
+```
+
+## 4. Analyse par université
+
+```{r}
+uni_benchmark <- df_canton_uni_robust %>% 
+  group_by(institution) %>% 
+  summarise(
+    etudiants_automne = sum(etudiants_automne, na.rm = TRUE),
+    diplomes = sum(diplomes, na.rm = TRUE),
+    entrants_automne = sum(entrants_automne, na.rm = TRUE),
+    uni_success_rate = diplomes / etudiants_automne * 100,
+    uni_success_io = diplomes / entrants_automne * 100,
+    .groups = "drop"
+  ) %>% 
+  arrange(desc(etudiants_automne))
+
+national_rate_uni <- df_canton_uni_robust %>% 
+  summarise(rate = sum(diplomes, na.rm = TRUE) / sum(etudiants_automne, na.rm = TRUE) * 100) %>% 
+  pull(rate)
+```
+
+### Classement des universités (pondéré par volume)
+
+```{r}
+uni_rank <- uni_benchmark %>% 
+  mutate(
+    uni_success_rate = round(uni_success_rate, 2),
+    uni_success_io = round(uni_success_io, 2)
+  ) %>% 
+  select(institution, etudiants_automne, diplomes, entrants_automne, uni_success_rate, uni_success_io)
+
+kable(uni_rank, caption = "Taux nationaux par université (cellules cantonales >= 50)")
+```
+
+### Dépendance cantonale à quelques universités
+
+```{r}
+df_uni_concentration <- df_canton_uni_robust %>% 
+  group_by(canton, region) %>% 
+  mutate(student_share = etudiants_automne / sum(etudiants_automne, na.rm = TRUE)) %>% 
+  arrange(desc(student_share), .by_group = TRUE) %>% 
+  mutate(rank_uni = row_number()) %>% 
+  summarise(
+    top3_share = sum(student_share[rank_uni <= 3], na.rm = TRUE),
+    n_universites = n(),
+    .groups = "drop"
+  )
+
+df_uni_mix_effect <- df_canton_uni_robust %>% 
+  left_join(uni_benchmark %>% select(institution, uni_success_rate), by = "institution") %>% 
+  group_by(canton, region) %>% 
+  summarise(
+    expected_uni_mix_rate = sum((etudiants_automne / sum(etudiants_automne, na.rm = TRUE)) * uni_success_rate, na.rm = TRUE),
+    .groups = "drop"
+  ) %>% 
+  mutate(uni_mix_effect_pp = expected_uni_mix_rate - national_rate_uni)
+
+df_uni_reading <- df_cantonal_success_rate_robust %>% 
+  select(canton, region, success_rate) %>% 
+  inner_join(df_uni_concentration, by = c("canton", "region")) %>% 
+  inner_join(df_uni_mix_effect, by = c("canton", "region"))
+
+ggplot(
+  df_uni_reading,
+  aes(x = top3_share, y = success_rate, label = canton, color = uni_mix_effect_pp)
+) +
+  geom_point(size = 2.4) +
+  ggrepel::geom_text_repel(size = 3) +
+  scale_color_gradient2(low = "#2166ac", mid = "grey80", high = "#b2182b", midpoint = 0) +
+  scale_x_continuous(labels = scales::percent_format(accuracy = 1)) +
+  labs(
+    title = "Concentration sur 3 universités vs taux cantonal",
+    subtitle = "Couleur = effet de composition universitaire (points de %)",
+    x = "Part des 3 principales universités",
+    y = "Diplômés / étudiants (%)",
+    color = "Effet mix uni (pp)"
+  ) +
+  theme_minimal()
+```
+
+### Questions éditoriales à creuser
+
+-   Les cantons au-dessus de la moyenne nationale le sont-ils surtout via leur **mix de branches** ou via une **surperformance interne**?
+-   Les cantons très concentrés sur peu d'universités ont-ils des profils de réussite plus volatils?
+-   Les écarts les plus forts se jouent-ils dans quelques branches (médecine, technique, etc.) ou sont-ils diffus?
+
+## DW cantonal success rate
+
+<https://app.datawrapper.de/tamedia/edit/WNduM/upload>
+
+```{r}
+df_cantonal_success_rate_robust %>% 
+  dw_data_to_chart("WNduM")
+
+# df_cantonal_success_rate %>%
+#   write_csv(file.path(output_dir, "df_cantonal_success_rate.csv"))
+```

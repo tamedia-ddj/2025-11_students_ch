@@ -1,0 +1,383 @@
+---
+title: "px_students_diploms"
+author: "Olaf König"
+format:
+  html:
+    self-contained: true
+    page-layout: full
+    toc: true
+    toc-depth: 4
+    number-sections: true
+    number-depth: 4
+    code-line-numbers: true
+    code-fold: true
+execute:
+  warning: false
+  message: false
+theme: cosmo
+editor: visual
+---
+
+```{r}
+# Data manipulation
+library(tidyverse)
+library(tidylog)
+library(readr)
+library(readxl)
+
+# Data visualization
+library(ggplot2)
+library(DatawRappr)
+library(ggrepel)
+library(knitr)
+
+# Utility
+library(here)
+library(janitor)
+
+# Custom theme for plots
+theme_set(theme_minimal())
+
+# Disable scientific notation
+options(scipen = 999)
+# # Re-enable scientific notation (default behavior)
+# options(scipen = 0)
+
+# Define project paths
+input_raw_dir <- here("input", "raw")
+input_processed_dir <- here("input", "processed") 
+output_dir <- here("output")
+```
+
+```{r}
+
+get_px <- function(url, chemin_local, nom_fichier) {
+  # Construire le chemin complet pour le fichier local
+  chemin_complet <- file.path(chemin_local, nom_fichier)
+  
+  # Créer le répertoire local s'il n'existe pas
+  if (!dir.exists(chemin_local)) {
+    dir.create(chemin_local, recursive = TRUE)
+  }
+  
+  # Télécharger le fichier depuis l'URL et l'enregistrer localement
+  download.file(url, destfile = chemin_complet, mode = "wb")
+  
+  # Vérifier si le fichier a été correctement téléchargé
+  if (file.exists(chemin_complet)) {
+    message("Téléchargement réussi : ", chemin_complet)
+    
+    # Lire et convertir l'encodage du fichier en UTF-8
+    lignes <- readLines(chemin_complet, encoding = "Windows-1252")
+    lignes_utf8 <- iconv(lignes, from = "Windows-1252", to = "UTF-8")
+    
+    # Écrire les lignes converties dans le même fichier avec encodage UTF-8
+    writeLines(lignes_utf8, file(chemin_complet, encoding = "UTF-8"))
+    message("Encodage converti en UTF-8.")
+    
+  } else {
+    message("Échec du téléchargement.")
+  }
+}
+
+```
+
+# Get PX data
+
+```{r}
+
+# #------------- Utilisation de la fonction------------
+# 
+# # https://www.pxweb.bfs.admin.ch/pxweb/fr/px-x-1503040100_103/-/px-x-1503040100_103.px/table/tableViewLayout2/
+# url_diploms <- "https://www.pxweb.bfs.admin.ch/sq/84512927-2a6c-4bbc-9913-4e85fd9d78d5"
+# 
+# # https://www.pxweb.bfs.admin.ch/pxweb/fr/px-x-1502040100_109/-/px-x-1502040100_109.px/table/tableViewLayout2/
+# url_students <- "https://www.pxweb.bfs.admin.ch/sq/2b684da0-3895-42f8-8b3b-3f8aa38faab5"
+# 
+# 
+# chemin_local <- input_raw_dir
+# nom_fichier_diploms <- "px_diploms_SHIS_studex_cant.csv"
+# nom_fichier_students <- "px_students_SHIS_studex_cant.csv"
+# 
+# get_px(url_diploms, chemin_local, nom_fichier_diploms)
+# get_px(url_students, chemin_local, nom_fichier_students)
+
+
+
+```
+
+# Data import
+
+```{r}
+
+# PX files
+df_px_diploms <- read_csv(file.path(chemin_local, nom_fichier_diploms)) %>%
+  janitor::clean_names()
+
+df_px_students <- read_csv(file.path(chemin_local, nom_fichier_students)) %>%
+  janitor::clean_names()
+
+# Excel data
+df_cantonal_success_rate <- read_csv(file.path(output_dir, "df_cantonal_success_rate.csv"))
+```
+
+## Grouped DF
+
+```{r}
+
+# DIPLOMS LONG AND GROUPED
+
+df_px_diploms_long <- df_px_diploms %>%
+  pivot_longer(
+    cols = "bs":"ethz",
+    names_to = "uni",
+    values_to = "value"
+  )
+
+df_px_diploms_canton_grouped <- df_px_diploms_long %>%
+  group_by(annee, canton_de_domicile_avant_le_debut_des_etudes) %>% 
+  summarise(
+    diploms = sum(value, na.rm = TRUE)
+  )
+
+df_px_diploms_uni_grouped <- df_px_diploms_long %>%
+  group_by(annee, uni) %>% 
+  summarise(
+    diploms = sum(value, na.rm = TRUE)
+  )
+
+
+# STUDENTS LONG AND GROUPED
+
+df_px_students_long <-df_px_students %>%
+  pivot_longer(
+    cols = "bs":"ethz",
+    names_to = "uni",
+    values_to = "value"
+  ) %>% 
+    mutate(
+    annee = str_sub(annee, 1, 4),
+    annee = as.integer(annee)
+  )
+
+df_px_students_canton_grouped <- df_px_students_long %>% 
+  group_by(annee, canton_de_domicile_avant_le_debut_des_etudes) %>% 
+  summarise(
+    students = sum(value, na.rm = TRUE)
+  )
+
+df_px_students_uni_grouped <- df_px_students_long %>%
+  group_by(annee, uni) %>% 
+  summarise(
+    students = sum(value, na.rm = TRUE)
+  )
+```
+
+## Combine DF
+
+```{r}
+
+df_px_canton <- df_px_diploms_canton_grouped %>% 
+  left_join(df_px_students_canton_grouped) %>% 
+  mutate(
+    diploms_per_students = diploms / students * 100
+  )
+
+
+df_px_uni <- df_px_diploms_uni_grouped %>% 
+  left_join(df_px_students_uni_grouped) %>% 
+  mutate(
+    diploms_per_students = diploms / students * 100
+  )
+```
+
+## Plots - check de la variation
+
+### Par cantons
+
+```{r}
+
+
+df_plot <- df_px_canton %>%
+  rename(canton = canton_de_domicile_avant_le_debut_des_etudes) %>%
+  filter(!is.na(diploms_per_students))
+
+p <- df_plot %>%
+  ggplot(aes(x = annee, y = diploms_per_students, group = canton)) +
+  geom_line(linewidth = 0.5) +
+  geom_point(size = 1) +
+  # facet_wrap(~ canton, nrow = 4, scales = "free_y") +
+  facet_wrap(~ canton, nrow = 4) + # scales fixe
+  scale_x_continuous(breaks = pretty_breaks(n = 8)) +
+  labs(
+    x = NULL,
+    y = "Diplômés / étudiants (%)",
+    title = "Diplômés par étudiant selon le canton de domicile"
+  ) +
+  theme_minimal(base_size = 10) +
+  theme(
+    panel.grid.minor = element_blank(),
+    strip.text = element_text(face = "bold", size = 8),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    plot.title = element_text(face = "bold"),
+    legend.position = "none"
+  )
+
+p
+```
+
+### Par universités
+
+```{r}
+
+library(dplyr)
+library(ggplot2)
+library(scales)
+
+p <- df_px_uni %>%
+  filter(!is.na(annee), !is.na(uni), !is.na(diploms_per_students)) %>%
+  filter(!uni == "iukb") %>% 
+  ggplot(aes(x = annee, y = diploms_per_students, group = uni)) +
+  geom_line(linewidth = 0.6) +
+  geom_point(size = 1.2) +
+  # facet_wrap(~ uni, nrow = 3, scales = "free_y") +
+  facet_wrap(~ uni, nrow = 3) +
+  scale_x_continuous(breaks = pretty_breaks(n = 8)) +
+  labs(
+    x = NULL,
+    y = "Diplômés / étudiants (%)",
+    title = "Diplômés par étudiant, par université"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    panel.grid.minor = element_blank(),
+    strip.text = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    plot.title = element_text(face = "bold"),
+    legend.position = "none"
+  )
+
+p
+```
+
+## Moyenne du ratio sur les 3 dernières années
+
+```{r}
+
+library(dplyr)
+
+last_years <- sort(unique(df_px_uni$annee), decreasing = TRUE)[1:3]
+
+df_px_uni_last3_mean <- df_px_uni %>%
+  filter(annee %in% last_years) %>%
+  group_by(uni) %>%
+  summarise(
+    diploms_per_students_3y_mean =
+      mean(diploms_per_students, na.rm = TRUE),
+    .groups = "drop"
+  ) %>% 
+  arrange(desc(diploms_per_students_3y_mean))
+
+last_years_canton <- sort(unique(df_px_canton$annee), decreasing = TRUE)[1:3]
+
+df_px_canton_last3_ratio <- df_px_canton %>%
+  rename(canton = canton_de_domicile_avant_le_debut_des_etudes) %>%
+  filter(annee %in% last_years_canton) %>%
+  group_by(canton) %>%
+  summarise(
+    diploms_3y  = sum(diploms, na.rm = TRUE),
+    students_3y = sum(students, na.rm = TRUE),
+    diploms_per_students_3y = 100 * diploms_3y / students_3y,
+    .groups = "drop"
+  ) %>% 
+    arrange(desc(diploms_per_students_3y))
+
+```
+
+### Données des tableaux
+
+```{r}
+
+# import data from tables
+df_discipline <- read.csv(file.path(input_processed_dir, "students_entries_spectialities_24_25_cantons.csv")) |> 
+  select(-any_of(c("Unnamed: 0", "Unnamed..0", "X")))
+
+# remove totals
+df_discipline_no_total <- df_discipline %>% 
+  filter(!domaine == "TOTAL") %>% 
+  filter(!unite == "TOTAL")
+
+#  grouping for uni
+df_discipline_uni_grouped <- df_discipline_no_total %>% 
+  group_by(metric, unite, institution) %>% 
+  summarise(valeur = sum(valeur, na.rm = TRUE)) %>% 
+  filter(metric %in% c("diplomes", "etudiants_automne")) %>% 
+  pivot_wider(
+    names_from = metric,
+    values_from = valeur
+  ) %>% 
+  mutate(success_rate_2024 = diplomes / etudiants_automne * 100,
+         unite = tolower(unite),
+         unite = str_replace_all(unite, "-", "_")) 
+```
+
+### DW graphique par canton
+
+<https://app.datawrapper.de/tamedia/edit/72Vps/upload>
+
+```{r}
+
+df_px_canton_last3_ratio %>% 
+  filter(!canton %in% c("Inconnu", "Domicile à l'étranger")) %>% 
+  left_join(df_cantonal_success_rate %>% 
+              select(canton, success_rate)) %>% 
+  mutate(
+    Kanton = paste0(
+      "![", canton, "](",
+      "https://interaktiv.tagesanzeiger.ch/static/kantonswappen/",
+      canton, ".svg)",
+      " ", canton
+    )
+  ) %>% 
+  rename(
+    "2022-24" = diploms_per_students_3y,
+    "2024" = success_rate
+  ) %>% 
+  select(Kanton, everything()) %>% 
+  dw_data_to_chart("72Vps")
+```
+
+```{=html}
+<iframe title="Ratio of Graduates to Students (%)" aria-label="Tabelle" id="datawrapper-chart-72Vps" src="https://datawrapper.dwcdn.net/72Vps/1/" scrolling="no" frameborder="0" style="border: none;" width="320" height="912" data-external="1"></iframe>
+```
+
+### DW Graphique par uni
+
+<https://app.datawrapper.de/tamedia/edit/HXTnS/visualize#refine>
+
+```{r}
+
+df_px_uni_last3_mean %>% 
+  left_join(df_discipline_uni_grouped %>% 
+              select(unite, institution, success_rate_2024), 
+            by = c("uni" = "unite")) %>% 
+  filter(!uni == "iukb") %>% 
+  rename(
+    "2022-24" = diploms_per_students_3y_mean,
+    "2024" = success_rate_2024
+  ) %>% 
+  select(institution, uni, everything()) %>% 
+  dw_data_to_chart("HXTnS")
+```
+
+```{=html}
+<iframe title="Ratio of Graduates to Students (%) (Copy)" aria-label="Tabelle" id="datawrapper-chart-HXTnS" src="https://datawrapper.dwcdn.net/HXTnS/1/" scrolling="no" frameborder="0" style="border: none;" width="320" height="743" data-external="1"></iframe>
+```
+
+# Spécialisations cantonales
+
+```{r}
+
+
+df_discipline_no_total
+```
