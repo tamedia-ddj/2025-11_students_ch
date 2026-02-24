@@ -378,6 +378,70 @@ df_px_uni_last3_mean %>%
 
 ```{r}
 
+# national specialisation with aborad students
+df_discipline_specialised_ch <- df_discipline_no_total %>% 
+  filter(metric == "etudiants_automne") %>% 
+  group_by(domaine) %>% 
+  summarise(sum_stud_ch = sum(valeur, na.rm = TRUE)) %>% 
+  ungroup() %>% 
+  mutate(
+    share_stud_ch = sum_stud_ch / sum(sum_stud_ch) * 100
+  )
 
-df_discipline_no_total
+# national specialisation without foreigners
+df_discipline_specialised_ch_no_foreigners <- df_discipline_no_total %>% 
+  filter(metric == "etudiants_automne") %>% 
+  filter(!canton == "ZZ") %>% 
+  group_by(domaine) %>% 
+  summarise(sum_stud_ch = sum(valeur, na.rm = TRUE)) %>% 
+  ungroup() %>% 
+  mutate(
+    share_stud_ch = sum_stud_ch / sum(sum_stud_ch) * 100
+  )
+
+# cantonal specialisation
+df_discipline_specialised_canton <- df_discipline_no_total %>% 
+  filter(metric == "etudiants_automne") %>% 
+  group_by(canton, region, domaine) %>% 
+  summarise(sum_stud = sum(valeur, na.rm = TRUE)) %>% 
+  group_by(canton, region) %>% 
+  mutate(
+    share_stud = sum_stud / sum(sum_stud) * 100
+  ) %>% 
+  ungroup()
+
+# merge
+df_discipline_specialised <- df_discipline_specialised_canton %>% 
+  left_join(df_discipline_specialised_ch_no_foreigners) %>% 
+  mutate(
+    diff_ch = share_stud - share_stud_ch
+  )
+```
+
+## Graphique des spécialisations cantonales
+
+<https://app.datawrapper.de/tamedia/edit/I5r4j/upload>
+
+```{r}
+
+df_discipline_specialised %>% 
+  filter(!canton == "ZZ") %>% 
+  mutate(
+    Kanton = paste0(
+      "![", canton, "](",
+      "https://interaktiv.tagesanzeiger.ch/static/kantonswappen/",
+      canton, ".svg)",
+      " ", canton
+    )
+  ) %>% 
+  select(Kanton, domaine, diff_ch) %>% 
+  pivot_wider(
+    names_from = domaine,
+    values_from = diff_ch
+  ) %>% 
+  dw_data_to_chart("I5r4j")
+```
+
+```{=html}
+<iframe title="Field of Study — Deviation from Swiss National Average" aria-label="Tabelle" id="datawrapper-chart-I5r4j" src="https://datawrapper.dwcdn.net/I5r4j/2/" scrolling="no" frameborder="0" style="border: none;" width="992" height="985" data-external="1"></iframe>
 ```
