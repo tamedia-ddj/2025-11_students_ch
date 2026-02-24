@@ -6,6 +6,7 @@ project:
     - discipline.qmd
     - districts.qmd
     - evolution.qmd
+    - prod_analysis_px.qmd
 
 website:
   title: "Étudiants 2025 – CH"
@@ -19,6 +20,8 @@ website:
         text: Districts
       - href: evolution.qmd
         text: Évolution
+      - href: prod_analysis_px.qmd
+        text: Production
 
 format:
   html:

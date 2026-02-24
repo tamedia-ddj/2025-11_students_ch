@@ -34,6 +34,8 @@ library(knitr)
 # Utility
 library(here)
 library(janitor)
+library(scales)
+
 
 # Custom theme for plots
 theme_set(theme_minimal())
@@ -95,10 +97,10 @@ get_px <- function(url, chemin_local, nom_fichier) {
 # url_students <- "https://www.pxweb.bfs.admin.ch/sq/2b684da0-3895-42f8-8b3b-3f8aa38faab5"
 # 
 # 
-# chemin_local <- input_raw_dir
-# nom_fichier_diploms <- "px_diploms_SHIS_studex_cant.csv"
-# nom_fichier_students <- "px_students_SHIS_studex_cant.csv"
-# 
+chemin_local <- input_raw_dir
+nom_fichier_diploms <- "px_diploms_SHIS_studex_cant.csv"
+nom_fichier_students <- "px_students_SHIS_studex_cant.csv"
+
 # get_px(url_diploms, chemin_local, nom_fichier_diploms)
 # get_px(url_students, chemin_local, nom_fichier_students)
 
@@ -111,10 +113,10 @@ get_px <- function(url, chemin_local, nom_fichier) {
 ```{r}
 
 # PX files
-df_px_diploms <- read_csv(file.path(chemin_local, nom_fichier_diploms)) %>%
+df_px_diploms <- read_csv(file.path(input_raw_dir, nom_fichier_diploms)) %>%
   janitor::clean_names()
 
-df_px_students <- read_csv(file.path(chemin_local, nom_fichier_students)) %>%
+df_px_students <- read_csv(file.path(input_raw_dir, nom_fichier_students)) %>%
   janitor::clean_names()
 
 # Excel data
