@@ -191,6 +191,45 @@ df_px_uni <- df_px_diploms_uni_grouped %>%
   mutate(
     diploms_per_students = diploms / students * 100
   )
+
+# toutes les combinaisons canton et uni
+df_px_combine_all <- df_px_diploms_long %>% 
+  group_by(annee, canton_de_domicile_avant_le_debut_des_etudes,
+           uni) %>% 
+  summarise(
+    diploms = sum(value, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  left_join(df_px_students_long %>% 
+              rename(students = value)) %>% 
+  mutate(
+        diploms_per_students = 100 * diploms / students,
+  )
+
+
+last_years <- sort(unique(df_px_combine_all$annee), decreasing = TRUE)[1:3]
+
+# 3 years mean
+df_px_canton_uni_3_yrs <- df_px_combine_all %>% 
+  group_by(canton_de_domicile_avant_le_debut_des_etudes,
+           uni) %>% 
+  summarise(
+    diploms_3y  = sum(diploms, na.rm = TRUE),
+    students_3y = sum(students, na.rm = TRUE),
+    diploms_per_students_3y = 100 * diploms_3y / students_3y,
+    .groups = "drop"
+  )
+
+# detailed df (canton & uni) 2024 && 3 years mean
+df_px_canton_uni_last_and_3yrs <- df_px_canton_uni_3_yrs %>% 
+  left_join(df_px_combine_all %>% 
+              filter(annee == 2024) %>% 
+              select(-annee) %>% 
+              rename(
+                diploms_2024 = diploms,
+                students_2024 = students,
+                diploms_per_students_2024 = diploms_per_students
+              ))
 ```
 
 ## Plots - check de la variation
@@ -296,7 +335,7 @@ df_px_canton_last3_ratio <- df_px_canton %>%
 
 ```
 
-### Données des tableaux
+### Données des tableaux OFS
 
 ```{r}
 
@@ -312,6 +351,19 @@ df_discipline_no_total <- df_discipline %>%
 #  grouping for uni
 df_discipline_uni_grouped <- df_discipline_no_total %>% 
   group_by(metric, unite, institution) %>% 
+  summarise(valeur = sum(valeur, na.rm = TRUE)) %>% 
+  filter(metric %in% c("diplomes", "etudiants_automne")) %>% 
+  pivot_wider(
+    names_from = metric,
+    values_from = valeur
+  ) %>% 
+  mutate(success_rate_2024 = diplomes / etudiants_automne * 100,
+         unite = tolower(unite),
+         unite = str_replace_all(unite, "-", "_")) 
+
+#  grouping for uni - cantons combination (dominic ask)
+df_discipline_uni_grouped <- df_discipline_no_total %>% 
+  group_by(metric, canton, unite, institution) %>% 
   summarise(valeur = sum(valeur, na.rm = TRUE)) %>% 
   filter(metric %in% c("diplomes", "etudiants_automne")) %>% 
   pivot_wider(
@@ -374,6 +426,109 @@ df_px_uni_last3_mean %>%
 
 ```{=html}
 <iframe title="Ratio of Graduates to Students (%) (Copy)" aria-label="Tabelle" id="datawrapper-chart-HXTnS" src="https://datawrapper.dwcdn.net/HXTnS/1/" scrolling="no" frameborder="0" style="border: none;" width="320" height="743" data-external="1"></iframe>
+```
+
+### DW Graphique par uni & par canton
+
+<https://app.datawrapper.de/tamedia/edit/vRSHa/visualize#refine>
+
+```{r}
+
+df_px_canton_uni_last_and_3yrs %>% 
+  rename(canton = canton_de_domicile_avant_le_debut_des_etudes) %>% 
+  filter(diploms_3y >= 150) %>% 
+  mutate(
+    Kanton = paste0(
+      "![", canton, "](",
+      "https://interaktiv.tagesanzeiger.ch/static/kantonswappen/",
+      canton, ".svg)",
+      " ", canton
+    )
+  ) %>% 
+  rename(
+    "2022-24" = diploms_per_students_3y,
+    "2024" = diploms_per_students_2024
+  ) %>% 
+  select(Kanton, everything()) %>% 
+  dw_data_to_chart("vRSHa")
+```
+
+# Combinaisons uni-canton
+
+```{r}
+
+library(tidyverse)
+
+df_plot <- df_discipline_uni_grouped %>%
+  filter(etudiants_automne >= 100)
+
+ggplot(df_plot, aes(x = reorder(canton, success_rate_2024),
+                    y = success_rate_2024)) +
+  geom_point(aes(size = etudiants_automne),
+             alpha = 0.7) +
+  facet_wrap(~ unite) +
+  coord_flip() +
+  scale_size_continuous(range = c(2, 8)) +
+  labs(
+    title = "Taux de succès 2024 par université et canton d’origine",
+    subtitle = "Uniquement cantons avec ≥ 100 étudiant·es",
+    x = "Canton d’origine",
+    y = "Taux de succès (%)",
+    size = "Nombre d’étudiant·es"
+  ) +
+  theme_minimal()
+```
+
+```{r}
+
+# ordre global des cantons
+canton_order <- df_plot %>%
+  group_by(canton) %>%
+  summarise(mean_rate = mean(success_rate_2024)) %>%
+  arrange(mean_rate) %>%
+  pull(canton)
+
+df_plot <- df_plot %>%
+  mutate(canton = factor(canton, levels = canton_order))
+
+ggplot(df_plot,
+       aes(x = canton,
+           y = success_rate_2024,
+           group = unite)) +
+  geom_line(alpha = 0.3) +
+  geom_point(aes(size = etudiants_automne), alpha = 0.8) +
+  facet_wrap(~ unite) +
+  coord_flip() +
+  scale_size(range = c(1.5, 6)) +
+  labs(
+    title = "Taux de succès 2024 par université",
+    subtitle = "Cantons avec ≥ 100 étudiant·es",
+    x = "Canton d’origine",
+    y = "Taux de succès (%)",
+    size = "Nombre d’étudiant·es"
+  ) +
+  theme_minimal()
+```
+
+```{r}
+
+ggplot(df_plot,
+       aes(x = reorder(unite, success_rate_2024),
+           y = success_rate_2024,
+           group = canton)) +
+  geom_line(alpha = 0.4) +
+  geom_point(aes(size = etudiants_automne), alpha = 0.8) +
+  facet_wrap(~ canton) +
+  coord_flip() +
+  scale_size(range = c(1.5, 6)) +
+  labs(
+    title = "Taux de succès 2024 par canton d’origine",
+    subtitle = "Cantons avec ≥ 100 étudiant·es",
+    x = "Université",
+    y = "Taux de succès (%)",
+    size = "Nombre d’étudiant·es"
+  ) +
+  theme_minimal()
 ```
 
 # Spécialisations cantonales
