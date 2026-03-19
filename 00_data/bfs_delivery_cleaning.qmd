@@ -1,0 +1,259 @@
+---
+title: "bfs_delivery_cleaning"
+author: "Olaf König"
+format:
+  html:
+    self-contained: true
+    page-layout: full
+    toc: true
+    toc-depth: 4
+    number-sections: true
+    number-depth: 4
+    code-line-numbers: true
+    code-fold: true
+execute:
+  warning: false
+  message: false
+theme: cosmo
+editor: visual
+---
+
+```{r}
+# Data manipulation
+library(tidyverse)
+library(tidylog)
+library(readr)
+library(readxl)
+
+# Data visualization
+library(ggplot2)
+library(DatawRappr)
+library(ggrepel)
+library(knitr)
+
+# Utility
+library(here)
+library(janitor)
+library(scales)
+
+
+# Custom theme for plots
+theme_set(theme_minimal())
+
+# Disable scientific notation
+options(scipen = 999)
+# # Re-enable scientific notation (default behavior)
+# options(scipen = 0)
+
+# Define project paths
+input_raw_dir <- here("input", "raw")
+input_processed_dir <- here("input", "processed") 
+output_dir <- here("output")
+```
+
+## Import
+
+```{r}
+
+xls <- readxl::excel_sheets(file.path(input_raw_dir, "Tamedia_20260312.xlsx"))
+
+canton_sheets <- c("canton_2014", "canton_2015", "canton_2016")
+
+canton_HEU_sheets <- c("canton_HEU_2014", "canton_HEU_2015", "canton_HEU_2016")
+
+canton_Domaine_sheets <- c("canton_Domaine_2014", "canton_Domaine_2015", "canton_Domaine_2016")
+```
+
+```{r}
+
+canton_codes <- c(
+  "Suisse"                           = "CH",
+  "Zürich"                           = "ZH",
+  "Bern / Berne"                     = "BE",
+  "Luzern"                           = "LU",
+  "Uri"                              = "UR",
+  "Schwyz"                           = "SZ",
+  "Obwalden"                         = "OW",
+  "Nidwalden"                        = "NW",
+  "Glarus"                           = "GL",
+  "Zug"                              = "ZG",
+  "Fribourg / Freiburg"              = "FR",
+  "Solothurn"                        = "SO",
+  "Basel-Stadt"                      = "BS",
+  "Basel-Landschaft"                 = "BL",
+  "Schaffhausen"                     = "SH",
+  "Appenzell Ausserrhoden"           = "AR",
+  "Appenzell Innerrhoden"            = "AI",
+  "St. Gallen"                       = "SG",
+  "Graubünden / Grigioni / Grischun" = "GR",
+  "Aargau"                           = "AG",
+  "Thurgau"                          = "TG",
+  "Ticino"                           = "TI",
+  "Vaud"                             = "VD",
+  "Valais / Wallis"                  = "VS",
+  "Neuchâtel"                        = "NE",
+  "Genève"                           = "GE",
+  "Jura"                             = "JU",
+  "Unknown"                          = "99",
+  "Total"                          = "TOT"
+  
+)
+```
+
+## Données des taux par canton
+
+```{r}
+
+library(tidyverse)
+library(readxl)
+
+file_path <- file.path(input_raw_dir, "Tamedia_20260312.xlsx")
+
+# Noms de colonnes courts définis manuellement (les headers Excel sont sur plusieurs lignes)
+col_names_clean <- c(
+  "canton",
+  "n",
+  "meme_ecole_meme_domaine",
+  "autre_ecole_meme_type_meme_domaine",
+  "meme_ecole_autre_domaine",
+  "autre_ecole_autre_type_autre_domaine",
+  "hes",
+  "hep",
+  "echec_restant",
+  "echec_abandon_ch",
+  "echec_abandon_hors_ch"
+)
+
+read_canton_sheet <- function(path, sheet) {
+  year <- as.integer(str_extract(sheet, "\\d{4}"))
+  
+  read_excel(
+    path,
+    sheet     = sheet,
+    skip      = 4,          # saute titre + lignes de headers
+    col_names = col_names_clean,
+    col_types = c("text", rep("numeric", 10))
+  ) %>%
+    filter(
+      !is.na(canton),
+      # !str_detect(canton, "^Total$"),
+      # !str_detect(canton, "Valeur non"),
+      !str_detect(canton, "Sources: Projet LABB"),
+      !str_detect(canton, "renseignements: pascal"),
+
+    ) %>%
+    mutate(
+  canton = case_when(
+    canton == "Total"                          ~ "Suisse",
+    str_detect(canton, "^Valeur non")          ~ "Unknown",
+    .default = canton
+  )
+) %>% 
+
+
+    mutate(annee = year) %>%
+    pivot_longer(
+      cols      = -c(canton, n, annee),
+      names_to  = "categorie",
+      values_to = "pct"
+    )
+}
+
+df_long <- map_dfr(canton_sheets, ~ read_canton_sheet(file_path, .x)) %>% 
+      mutate(canton_code = canton_codes[canton])
+
+unique(df_long$canton)
+
+
+df_long %>% write_csv(file.path(input_processed_dir, "df_bfs_delivery_canton_rate.csv"))
+```
+
+## Données des taux par canton x universités
+
+```{r}
+
+read_canton_heu_sheet <- function(path, sheet) {
+  year <- as.integer(str_extract(sheet, "\\d{4}"))
+  
+  raw <- read_excel(path, sheet = sheet, col_names = FALSE, col_types = "text")
+  colnames(raw) <- c("heu", "n", col_names_clean[3:11])
+  
+  raw %>%
+    filter(
+      !is.na(heu),
+      !str_detect(heu, "^Taux de r"),
+      !str_detect(heu, "^Sources|^renseignements"),
+      is.na(n) | n != "N"            # ← fix : garde séparateurs ET filtre headers
+    ) %>%
+    mutate(
+      is_separator = is.na(n),
+      canton = if_else(is_separator, heu, NA_character_)
+    ) %>%
+    fill(canton, .direction = "down") %>%
+    filter(!is_separator) %>%
+    select(-is_separator) %>%
+    mutate(across(-c(canton, heu), as.numeric)) %>%
+    mutate(
+      annee = year,
+      canton = case_when(
+        str_detect(canton, "^Valeur non") ~ "Unknown",
+        .default = canton
+      ),
+      canton_code = canton_codes[canton]
+    ) %>%
+    pivot_longer(
+      cols      = -c(canton, canton_code, heu, n, annee),
+      names_to  = "categorie",
+      values_to = "pct"
+    )
+}
+
+df_heu_long <- map_dfr(canton_HEU_sheets, ~ read_canton_heu_sheet(file_path, .x))
+
+
+df_heu_long %>% write_csv(file.path(input_processed_dir, "df_bfs_delivery_canton_university_rate.csv"))
+```
+
+```{r}
+read_canton_group_sheet <- function(path, sheet, group_var = "heu") {
+  year <- as.integer(str_extract(sheet, "\\d{4}"))
+  raw <- read_excel(path, sheet = sheet, col_names = FALSE, col_types = "text")
+  colnames(raw) <- c(group_var, "n", col_names_clean[3:11])
+  
+  raw %>%
+    filter(
+      !is.na(.data[[group_var]]),
+      !str_detect(.data[[group_var]], "^Taux de r"),
+      !str_detect(.data[[group_var]], "^Sources|^renseignements"),
+      is.na(n) | n != "N"
+    ) %>%
+    mutate(
+      is_separator = is.na(n),
+      canton = if_else(is_separator, .data[[group_var]], NA_character_)
+    ) %>%
+    fill(canton, .direction = "down") %>%
+    filter(!is_separator) %>%
+    select(-is_separator) %>%
+    mutate(across(-c(canton, .data[[group_var]]), as.numeric)) %>%
+    mutate(
+      annee = year,
+      canton = case_when(
+        str_detect(canton, "^Valeur non") ~ "Unknown",
+        .default = canton
+      ),
+      canton_code = canton_codes[canton]
+    ) %>%
+    pivot_longer(
+      cols      = -c(canton, canton_code, all_of(group_var), n, annee),
+      names_to  = "categorie",
+      values_to = "pct"
+    )
+}
+
+# Usage
+df_heu_long     <- map_dfr(canton_HEU_sheets,     ~ read_canton_group_sheet(file_path, .x, "heu"))
+df_domaine_long <- map_dfr(canton_Domaine_sheets, ~ read_canton_group_sheet(file_path, .x, "domaine"))
+
+
+df_domaine_long %>%  write_csv(file.path(input_processed_dir, "df_bfs_delivery_canton_domain_rate.csv"))
+```
