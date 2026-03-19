@@ -209,8 +209,9 @@ df_px_combine_all <- df_px_diploms_long %>%
 
 last_years <- sort(unique(df_px_combine_all$annee), decreasing = TRUE)[1:3]
 
-# 3 years mean
+# 3 years mean canton & uni
 df_px_canton_uni_3_yrs <- df_px_combine_all %>% 
+  filter(annee %in% last_years) %>% 
   group_by(canton_de_domicile_avant_le_debut_des_etudes,
            uni) %>% 
   summarise(
@@ -219,6 +220,42 @@ df_px_canton_uni_3_yrs <- df_px_combine_all %>%
     diploms_per_students_3y = 100 * diploms_3y / students_3y,
     .groups = "drop"
   )
+
+# 3 years mean CANTON
+df_px_canton_3_yrs <- df_px_combine_all %>% 
+    filter(annee %in% last_years) %>% 
+  group_by(canton_de_domicile_avant_le_debut_des_etudes
+           ) %>% 
+  summarise(
+    diploms_3y  = sum(diploms, na.rm = TRUE),
+    students_3y = sum(students, na.rm = TRUE),
+    diploms_per_students_3y = 100 * diploms_3y / students_3y,
+    .groups = "drop"
+  ) %>% 
+  mutate(
+    uni = "all"
+  )
+
+# 3 years mean UNI
+df_px_uni_3_yrs <- df_px_combine_all %>% 
+    filter(annee %in% last_years) %>% 
+  group_by(uni
+           ) %>% 
+  summarise(
+    diploms_3y  = sum(diploms, na.rm = TRUE),
+    students_3y = sum(students, na.rm = TRUE),
+    diploms_per_students_3y = 100 * diploms_3y / students_3y,
+    .groups = "drop"
+  ) %>% 
+  mutate(
+    canton_de_domicile_avant_le_debut_des_etudes = "all"
+  )
+
+# detailed df (canton & uni) JUST 3 years mean
+df_px_canton_uni_detailed_3yrs <- df_px_canton_uni_3_yrs %>% 
+  bind_rows(df_px_canton_3_yrs) %>% 
+  bind_rows(df_px_uni_3_yrs)
+
 
 # detailed df (canton & uni) 2024 && 3 years mean
 df_px_canton_uni_last_and_3yrs <- df_px_canton_uni_3_yrs %>% 
@@ -451,6 +488,143 @@ df_px_canton_uni_last_and_3yrs %>%
   ) %>% 
   select(Kanton, everything()) %>% 
   dw_data_to_chart("vRSHa")
+```
+
+## Dataset pour outil
+
+```{r}
+
+canton_traduction <- tamMap::canton_CH() %>% 
+  select(iso2, fre, ger) %>%
+  rename(canton = iso2,
+         canton_fr = fre,
+         canton_de = ger)
+
+
+df_universites <- tibble(
+  uni = c("be", "bs", "epfl", "ethz", "fr", "fs_ch", "ge", "iheid",
+          "iukb", "ls", "lu", "ne", "sg", "usi", "uzh"),
+  
+  uni_de_complete = c(
+    "Universität Bern",
+    "Universität Basel",
+    "École polytechnique fédérale de Lausanne (EPFL)",
+    "Eidgenössische Technische Hochschule Zürich (ETH Zürich)",
+    "Universität Freiburg",
+    "FernUni Schweiz",
+    "Universität Genf",
+    "Institut für internationale Studien und Entwicklung (IHEID)",
+    "Universitäres Institut Kurt Bösch (IUKB)",
+    "Universität Lausanne",
+    "Universität Luzern",
+    "Universität Neuenburg",
+    "Universität St. Gallen (HSG)",
+    "Universität der italienischen Schweiz (USI)",
+    "Universität Zürich"
+  ),
+  
+  uni_fr_complete = c(
+    "Université de Berne",
+    "Université de Bâle",
+    "École polytechnique fédérale de Lausanne (EPFL)",
+    "École polytechnique fédérale de Zurich (ETH Zurich)",
+    "Université de Fribourg",
+    "Université à distance Suisse",
+    "Université de Genève",
+    "Institut de hautes études internationales et du développement (IHEID)",
+    "Institut universitaire Kurt Bösch (IUKB)",
+    "Université de Lausanne",
+    "Université de Lucerne",
+    "Université de Neuchâtel",
+    "Université de Saint-Gall (HSG)",
+    "Université de la Suisse italienne (USI)",
+    "Université de Zurich"
+  ),
+  
+  uni_de = c(
+    "Uni. Bern",
+    "Uni. Basel",
+    "EPFL",
+    "ETH Zurich",
+    "Uni. Freiburg",
+    "FernUni Schweiz",
+    "Uni. Genf",
+    "IHEID Genf",
+    "IUKB Sion",
+    "Uni. Lausanne",
+    "Uni. Luzern",
+    "Uni. Neuenburg",
+    "Uni. St. Gallen",
+    "USI",
+    "Uni. Zürich"
+  ),
+  
+  uni_fr = c(
+    "Uni. Berne",
+    "Uni. Bâle",
+    "EPFL",
+    "ETH Zurich",
+    "Uni. Fribourg",
+    "UniDistance Suisse",
+    "Uni. Genève",
+    "IHEID Genève",
+    "IUKB Sion",
+    "Uni. Lausanne",
+    "Uni. Lucerne",
+    "Uni. Neuchâtel",
+    "Uni. St-Gall",
+    "USI",
+    "Uni. Zurich"
+  )
+)
+
+df_logos_uni <- tibble(
+  uni = c(
+    "be","bs","epfl","ethz","fr","fs_ch","ge",
+    "iheid","iukb","ls","lu","ne","sg","usi","uzh"
+  ),
+  logo_file = c(
+    "be.png",
+    "bs.svg",
+    "epfl.svg",
+    "ethz.png",
+    "fr.png",
+    "fs_ch.svg",
+    "ge.png",
+    "iheid.png",
+    "iukb.avif",
+    "ls.svg",
+    "lu.svg",
+    "ne.png",
+    "sg.svg",
+    "usi.svg",
+    "uzh.svg"
+  )
+)
+```
+
+```{r}
+
+
+
+df_px_dataset_for_tool <- df_px_canton_uni_detailed_3yrs %>% 
+  filter(diploms_3y >= 60) %>% 
+  filter(
+    !canton_de_domicile_avant_le_debut_des_etudes == "Domicile à l'étranger") %>% 
+  rename(
+    canton = canton_de_domicile_avant_le_debut_des_etudes,
+  ) %>% 
+  left_join(canton_traduction) %>% 
+  left_join(df_universites %>% select(uni, uni_de, uni_fr)) %>% 
+  left_join(df_logos_uni) %>% 
+  select(canton, canton_fr, canton_de,
+         uni, uni_fr, uni_de, logo_file,
+         diploms_3y, students_3y, diploms_per_students_3y)
+
+
+df_px_dataset_for_tool %>% write_csv(file.path("/Users/bajj@mediait.ch/Documents/Tamedia/2026/interaktiv-2026-university_students/public/data", "data.csv"))
+
+df_px_dataset_for_tool %>% write_csv(file.path("/Users/bajj@mediait.ch/Documents/Tamedia/2026/interaktiv-2026-university_students/src/data", "data.csv"))
 ```
 
 # Combinaisons uni-canton
