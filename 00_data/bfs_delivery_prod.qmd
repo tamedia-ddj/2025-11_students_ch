@@ -1,0 +1,618 @@
+---
+title: "bfs_delivery_prod"
+author: "Olaf König"
+format:
+  html:
+    self-contained: true
+    page-layout: full
+    toc: true
+    toc-depth: 4
+    number-sections: true
+    number-depth: 4
+    code-line-numbers: true
+    code-fold: true
+execute:
+  warning: false
+  message: false
+theme: cosmo
+editor: visual
+---
+
+```{r}
+# Data manipulation
+library(tidyverse)
+library(tidylog)
+library(readr)
+library(readxl)
+
+# Data visualization
+library(ggplot2)
+library(DatawRappr)
+library(ggrepel)
+library(knitr)
+
+# Utility
+library(here)
+library(janitor)
+library(scales)
+
+
+# Custom theme for plots
+theme_set(theme_minimal())
+
+# Disable scientific notation
+options(scipen = 999)
+# # Re-enable scientific notation (default behavior)
+# options(scipen = 0)
+
+# Define project paths
+input_raw_dir <- here("input", "raw")
+input_processed_dir <- here("input", "processed") 
+output_dir <- here("output")
+```
+
+## Import
+
+```{r}
+
+df_canton <- read_csv(file.path(input_processed_dir, "df_bfs_delivery_canton_rate.csv"))
+
+df_canton_heu <- read_csv(file.path(input_processed_dir, "df_bfs_delivery_canton_university_rate.csv")) %>% 
+    mutate(canton_code = if_else(canton_code == "TOT", "CH", canton_code))
+
+df_canton_domaine <- read_csv(file.path(input_processed_dir, "df_bfs_delivery_canton_domain_rate.csv"))
+```
+
+#### Catégories de bases (cf tableau excel)
+
+-   Réussite dans la même école et même domaine
+-   Réussite dans une autre école du même type et même domaine
+-   Réussite dans la même école mais autre domaine
+-   Réussite dans une autre école du même type et autre domaine
+-   Réussite dans une HES
+-   Réussite dans une HEP
+-   Pas de réussite : restant
+-   Pas de réussite : abandon mais toujours en Suisse
+-   Pas de réussite : abandon et a quitté la Suisse
+
+```{r}
+
+unique(df_canton$categorie)
+
+cle_categories <- tribble(
+  ~categorie,                             ~groupe_fin,      ~groupe_moyen,
+  "meme_ecole_meme_domaine",              "continuation",   "succes",
+  "autre_ecole_meme_type_meme_domaine",   "mobilite",       "succes",
+  "meme_ecole_autre_domaine",             "reorientation",  "reorientation",
+  "autre_ecole_autre_type_autre_domaine", "reorientation",  "reorientation",
+  "hes",                                  "vers_hes",       "reorientation",
+  "hep",                                  "vers_hep",       "reorientation",
+  "echec_restant",                        "echec",          "echec_abandon",
+  "echec_abandon_ch",                     "abandon_ch",     "echec_abandon",
+  "echec_abandon_hors_ch",               "abandon_hors_ch", "echec_abandon"
+)
+```
+
+# Niveau - ventilation des cantons
+
+### Agrégation des groupes (échec et abandons)
+
+```{r}
+
+df_canton <- df_canton %>%
+  left_join(cle_categories, by = "categorie")
+
+df_canton_grouped <- df_canton %>% 
+  group_by(canton_code, annee, groupe_moyen) %>% 
+  summarise(
+    pct = sum(pct, na.rm = TRUE),
+    n_tot = first(n),
+    .groups = "drop"
+  ) %>% 
+  mutate(
+    n_group = round(n_tot * pct / 100, digits = 0)
+  )
+
+df_canton_grouped_3yrs <- df_canton_grouped %>% 
+  group_by(canton_code, groupe_moyen) %>% 
+  summarise(
+    n_group = sum(n_group),
+    .groups = "drop"
+  ) %>% 
+  left_join(df_canton_grouped %>% 
+              filter(groupe_moyen == "echec_abandon") %>% # filtre sur une catégorie
+              group_by(canton_code) %>% 
+              summarise(
+                n_tot = sum(n_tot)
+              )) %>% 
+  mutate(
+    pct = n_group / n_tot * 100
+  )
+
+
+
+
+df_canton_grouped %>% 
+  filter(groupe_moyen == "echec_abandon") %>% 
+  filter(canton_code != "99") %>% 
+  ggplot(aes(x = pct, y = reorder(canton_code, pct))) +
+    geom_col() +
+  theme_minimal() +
+    facet_wrap(~annee)
+```
+
+```{r}
+
+df_canton_grouped_3yrs %>% 
+  filter(groupe_moyen == "echec_abandon") %>% 
+  filter(!canton_code == "99") %>% 
+  ggplot(aes(x = pct, y = reorder(canton_code, pct))) +
+    geom_col() +
+    theme_minimal()
+
+```
+
+### DW Chart echec par canton 3 ans
+
+<https://app.datawrapper.de/tamedia/edit/fyWSn/upload>
+
+```{r}
+library(DatawRappr)
+
+# création d'un dataset
+dw_canton_synthese <- df_canton_grouped_3yrs %>% 
+  select(-n_tot) %>% 
+  pivot_wider(
+    names_from = groupe_moyen,
+    values_from = c(pct, n_group)
+  ) %>% 
+  left_join(
+    df_canton_grouped %>% 
+      select(canton_code, annee, groupe_moyen, pct) %>% 
+      pivot_wider(
+        names_from = c(groupe_moyen, annee),
+        values_from = pct
+      )
+  ) %>% 
+  select(
+    canton_code,
+    pct_echec_abandon, pct_reorientation, pct_succes,
+    n_group_echec_abandon, n_group_reorientation, n_group_succes,
+    starts_with("echec_abandon_"),
+    starts_with("reorientation_"),
+    starts_with("succes_")
+  )
+
+
+# envoi des données vers le graphique
+dw_canton_synthese %>% 
+  filter(!canton_code == "99") %>% 
+    mutate(
+    Kanton = paste0(
+      "![", canton_code, "](",
+      "https://interaktiv.tagesanzeiger.ch/static/kantonswappen/",
+      canton_code, ".svg)",
+      " ", canton_code)
+    ) %>% 
+  select(Kanton, everything()) %>% 
+  DatawRappr::dw_data_to_chart("fyWSn")
+```
+
+```{=html}
+<iframe title="Kumulierte Ausfallquote nach 3 Jahren – aggregierte Eintrittskohorten 2014–2016 nach Kanton" aria-label="Tabelle" id="datawrapper-chart-fyWSn" src="https://datawrapper.dwcdn.net/fyWSn/1/" scrolling="no" frameborder="0" style="border: none;" width="320" height="1114" data-external="1"></iframe>
+```
+
+# Niveau - ventilation cantons X universités
+
+```{r}
+
+canton_traduction <- tamMap::canton_CH() %>% 
+  select(iso2, fre, ger) %>%
+  rename(canton = iso2,
+         canton_fr = fre,
+         canton_de = ger)
+
+
+df_universites <- tibble(
+  uni = c("tot", "autre", "be", "bs", "epfl", "ethz", "fr", "fs_ch", "ge", "iheid",
+          "iukb", "ls", "lu", "ne", "sg", "usi", "uzh"),
+  
+  uni_de_complete = c(
+    "Total",
+    "Andere",
+    "Universität Bern",
+    "Universität Basel",
+    "École polytechnique fédérale de Lausanne (EPFL)",
+    "Eidgenössische Technische Hochschule Zürich (ETH Zürich)",
+    "Universität Freiburg",
+    "FernUni Schweiz",
+    "Universität Genf",
+    "Institut für internationale Studien und Entwicklung (IHEID)",
+    "Universitäres Institut Kurt Bösch (IUKB)",
+    "Universität Lausanne",
+    "Universität Luzern",
+    "Universität Neuenburg",
+    "Universität St. Gallen (HSG)",
+    "Universität der italienischen Schweiz (USI)",
+    "Universität Zürich"
+  ),
+  
+  uni_fr_complete = c(
+    "Total",
+    "Autre",
+    "Université de Berne",
+    "Université de Bâle",
+    "École polytechnique fédérale de Lausanne (EPFL)",
+    "École polytechnique fédérale de Zurich (ETH Zurich)",
+    "Université de Fribourg",
+    "Université à distance Suisse",
+    "Université de Genève",
+    "Institut de hautes études internationales et du développement (IHEID)",
+    "Institut universitaire Kurt Bösch (IUKB)",
+    "Université de Lausanne",
+    "Université de Lucerne",
+    "Université de Neuchâtel",
+    "Université de Saint-Gall (HSG)",
+    "Université de la Suisse italienne (USI)",
+    "Université de Zurich"
+  ),
+  
+  uni_de = c(
+    "Total",
+    "Andere",
+    "Uni. Bern",
+    "Uni. Basel",
+    "EPFL",
+    "ETH Zurich",
+    "Uni. Freiburg",
+    "FernUni Schweiz",
+    "Uni. Genf",
+    "IHEID Genf",
+    "IUKB Sion",
+    "Uni. Lausanne",
+    "Uni. Luzern",
+    "Uni. Neuenburg",
+    "Uni. St. Gallen",
+    "USI",
+    "Uni. Zürich"
+  ),
+  
+  uni_fr = c(
+    "Total",
+    "Autre",
+    "Uni. Berne",
+    "Uni. Bâle",
+    "EPFL",
+    "ETH Zurich",
+    "Uni. Fribourg",
+    "UniDistance Suisse",
+    "Uni. Genève",
+    "IHEID Genève",
+    "IUKB Sion",
+    "Uni. Lausanne",
+    "Uni. Lucerne",
+    "Uni. Neuchâtel",
+    "Uni. St-Gall",
+    "USI",
+    "Uni. Zurich"
+  )
+)
+
+df_logos_uni <- tibble(
+  uni = c(
+    "be","bs","epfl","ethz","fr","fs_ch","ge",
+    "iheid","iukb","ls","lu","ne","sg","usi","uzh"
+  ),
+  logo_file = c(
+    "be.png",
+    "bs.svg",
+    "epfl.svg",
+    "ethz.png",
+    "fr.png",
+    "fs_ch.svg",
+    "ge.png",
+    "iheid.png",
+    "iukb.avif",
+    "ls.svg",
+    "lu.svg",
+    "ne.png",
+    "sg.svg",
+    "usi.svg",
+    "uzh.svg"
+  )
+)
+
+df_universites <- df_universites %>%
+  left_join(df_logos_uni) %>% 
+  mutate(heu = c(
+    "Total",
+    "Autres instituts universitaires",
+    "Université de Berne",               # be
+    "Université de Bâle",                # bs
+    "EPF de Lausanne",                   # epfl
+    "EPF de Zürich",                     # ethz
+    "Université de Fribourg",            # fr
+    NA,                                  # fs_ch (absent OFS)
+    "Université de Genève",              # ge
+    NA,                                  # iheid (absent OFS)
+    NA,                                  # iukb (absent OFS)
+    "Université de Lausanne",            # ls
+    "Université de Lucerne",             # lu
+    "Université de Neuchâtel",           # ne
+    "Université de St-Gall",             # sg
+    "Université de la Suisse italienne", # usi
+    "Université de Zürich"               # uzh
+  ))
+```
+
+```{r}
+
+df_canton_heu <- df_canton_heu %>% 
+  left_join(cle_categories)
+
+
+# agregation
+df_canton_heu_grouped <- df_canton_heu %>% 
+  group_by(heu, canton_code, annee, groupe_moyen) %>%
+  summarise(
+    pct = sum(pct, na.rm = TRUE),
+    n_tot = first(n),
+    .groups = "drop"
+  )%>% 
+  mutate(
+    n_group = round(n_tot * pct / 100, digits = 0)
+  )
+
+
+# agregation 3 ans
+df_canton_heu_grouped_3yrs <- df_canton_heu_grouped %>% 
+  group_by(canton_code, heu, groupe_moyen) %>% 
+  summarise(
+    n_group = sum(n_group),
+    .groups = "drop"
+  ) %>% 
+  left_join(df_canton_heu_grouped %>% 
+              filter(groupe_moyen == "echec_abandon") %>% # filtre sur une catégorie
+              group_by(canton_code, heu) %>% 
+              summarise(
+                n_tot = sum(n_tot)
+              )) %>% 
+  mutate(
+    pct = n_group / n_tot * 100
+  )
+```
+
+## DW Chart by canton X uni 3 years
+
+```{r}
+
+canton_traduction <- tamMap::canton_CH() %>% 
+  select(iso2, fre, ger) %>%
+  rename(canton = iso2,
+         canton_fr = fre,
+         canton_de = ger) %>% 
+    add_row(canton = "CH", canton_fr = "Suisse", canton_de = "Schweiz") %>% 
+  mutate(
+    Kanton = paste0(
+      "![", canton, "](",
+      "https://interaktiv.tagesanzeiger.ch/static/kantonswappen/",
+      canton, ".svg)",
+      " ", canton)
+    )
+```
+
+<https://app.datawrapper.de/tamedia/edit/7XsgG/visualize#refine>
+
+```{r}
+
+dw_canton_heu_grouped_3yrs <- df_canton_heu_grouped_3yrs %>% 
+  filter(groupe_moyen == "echec_abandon") %>% 
+  filter(!canton_code == "99") %>% 
+  filter(n_tot >= 15) %>% 
+  left_join(df_universites %>%
+              select(uni_de, uni_fr, heu)) %>% 
+  left_join(canton_traduction %>% 
+              select(canton, Kanton),
+            by = c("canton_code" = "canton")) %>% 
+  select(Kanton, uni_de, uni_fr, everything()) %>% 
+  arrange(Kanton, desc(pct))
+
+# Trier par canton d'origine
+dw_canton_heu_grouped_3yrs %>% 
+  DatawRappr::dw_data_to_chart("7XsgG") 
+
+```
+
+## DW Chart by uni X canton 3 years
+
+<https://app.datawrapper.de/tamedia/edit/HCsfz/visualize#refine>
+
+```{r}
+
+# Trier par universités
+dw_canton_heu_grouped_3yrs %>% 
+  arrange(uni_de, desc(pct)) %>% 
+  DatawRappr::dw_data_to_chart("HCsfz")
+```
+
+# Chart interactif observable (canton x uni)
+
+```{r}
+
+df_ojs <- df_canton_heu_grouped_3yrs %>%
+  left_join(df_universites %>%
+              select(uni_de, uni_fr, heu)) %>% 
+  select(canton_code, uni_fr, uni_de, groupe_moyen, pct, n_group, n_tot) %>%
+  filter(
+    !canton_code %in% c("CH", "99"),  # exclure total national + "autres"
+    !uni_fr == "Autre",
+    # uni_fr != "Total",
+    n_group >= 5  # seuil minimum pour éviter les % bruités
+  )
+
+ojs_define(data = df_ojs)
+```
+
+```{ojs}
+
+data_t = transpose(data)
+
+colors = ({
+  echec_abandon: "#D3343F",
+  succes:        "#479260",
+  reorientation: "#A757A3"
+})
+
+labels = ({
+  echec_abandon: "Échec / abandon",
+  succes:        "Succès",
+  reorientation: "Réorientation"
+})
+
+viewof dim = Inputs.radio(["uni", "canton"], {
+  value: "uni",
+  label: "Afficher par",
+  format: d => d === "uni" ? "Université" : "Canton"
+})
+
+viewof metrique = Inputs.radio(
+  ["echec_abandon", "succes", "reorientation"], {
+  value: "echec_abandon",
+  label: "Indicateur",
+  format: d => labels[d]
+})
+
+facet_key = dim === "uni" ? "uni_fr"      : "canton_code"
+bar_key   = dim === "uni" ? "canton_code" : "uni_fr"
+
+facets_ordered = {
+  const agg = d3.rollup(
+    data_t,
+    v => d3.max(v, d => d.n_tot),
+    d => d[facet_key]
+  )
+  return [...agg.entries()]
+    .filter(([k]) => k !== "Total" && k !== "CH")
+    .sort((a, b) => d3.descending(a[1], b[1]))
+    .map(([k]) => k)
+}
+
+viewof selected = Inputs.select(facets_ordered, {
+  label: "Filtrer",
+  multiple: true,
+  value: facets_ordered.slice(0, 12)
+})
+
+data_f = data_t.filter(d =>
+  d.groupe_moyen === metrique &&
+  selected.includes(d[facet_key])
+)
+
+max_global = d3.max(data_f, d => d.pct)
+
+plots = facets_ordered
+  .filter(f => selected.includes(f))
+  .map(facet => {
+    const fdata = data_f
+      .filter(d => d[facet_key] === facet)
+      .sort((a, b) => d3.descending(a.pct, b.pct))
+
+    if (fdata.length === 0) return null
+
+    const bar_h = 18
+    const h     = fdata.length * (bar_h + 4) + 40
+
+    const plot = Plot.plot({
+      width: 280,
+      height: h,
+      marginLeft: 78,
+      marginRight: 42,
+      marginTop: 6,
+      marginBottom: 6,
+      x: {
+        axis: null,
+        domain: [0, max_global * 1.08]
+      },
+      y: {
+        axis: null,
+        domain: fdata.map(d => d[bar_key])
+      },
+      marks: [
+        Plot.barX(fdata, {
+          x: max_global,
+          y: bar_key,
+          fill: "#e5e7eb",
+          height: bar_h,
+          rx: 2
+        }),
+        Plot.barX(fdata, {
+          x: "pct",
+          y: bar_key,
+          fill: colors[metrique],
+          height: bar_h,
+          rx: 2,
+          fillOpacity: 0.9
+        }),
+        Plot.text(fdata, {
+          x: "pct",
+          y: bar_key,
+          text: d => d.pct.toFixed(1) + "%",
+          dx: 4,
+          textAnchor: "start",
+          fontSize: 10,
+          fill: "#374151"
+        }),
+        Plot.text(fdata, {
+          x: 0,
+          y: bar_key,
+          text: bar_key,
+          dx: -3,
+          textAnchor: "end",
+          fontSize: 10,
+          fill: "#374151"
+        })
+      ],
+      style: {
+        fontSize: "10px",
+        fontFamily: "inherit",
+        background: "transparent",
+        overflow: "visible",
+        width: "100%"
+      }
+    })
+
+    return html`<div style="
+      background: #f9fafb;
+      border: 1px solid #e5e7eb;
+      border-radius: 6px;
+      padding: 10px 6px 8px 6px;
+    ">
+      <div style="
+        font-weight: 700;
+        font-size: 13px;
+        text-align: center;
+        margin-bottom: 4px;
+      ">${facet}</div>
+      ${plot}
+    </div>`
+  })
+  .filter(Boolean)
+
+html`<style>
+  @media (max-width: 600px) {
+    .sm-grid { grid-template-columns: repeat(2, 1fr) !important; }
+  }
+</style>
+<div class="sm-grid" style="
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 10px;
+  margin-top: 8px;
+">${plots}</div>`
+```
+
+## Niveau - ventilation canton - domaines d'étude
+
+```{r}
+
+```
