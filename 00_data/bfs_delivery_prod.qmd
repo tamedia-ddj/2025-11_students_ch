@@ -435,16 +435,41 @@ dw_canton_heu_grouped_3yrs %>%
   DatawRappr::dw_data_to_chart("HCsfz")
 ```
 
-# Chart interactif observable (canton x uni)
+## Chart interactif observable (canton x uni)
+
+Calcul des écarte à la moyenne
+
+```{r}
+
+# Référence 1 : moyenne nationale par université (canton_code == "CH")
+ref_par_uni <- df_canton_heu_grouped_3yrs %>%
+  filter(canton_code == "CH") %>%
+  select(heu, groupe_moyen, pct_ref_uni = pct)
+
+# Référence 2 : moyenne cantonale toutes universités (heu == "Total")
+ref_par_canton <- df_canton_heu_grouped_3yrs %>%
+  filter(heu == "Total") %>%
+  select(canton_code, groupe_moyen, pct_ref_canton = pct)
+
+# Jointure et calcul des deux écarts
+df_canton_heu_grouped_3yrs <- df_canton_heu_grouped_3yrs %>%
+  left_join(ref_par_uni,    by = c("heu", "groupe_moyen")) %>%
+  left_join(ref_par_canton, by = c("canton_code", "groupe_moyen")) %>%
+  mutate(
+    ecart_vs_uni    = round(pct - pct_ref_uni,    1),  # écart canton vs moyenne uni
+    ecart_vs_canton = round(pct - pct_ref_canton, 1)   # écart uni vs moyenne canton
+  )
+```
 
 ```{r}
 
 df_ojs <- df_canton_heu_grouped_3yrs %>%
   left_join(df_universites %>%
               select(uni_de, uni_fr, heu)) %>% 
-  select(canton_code, uni_fr, uni_de, groupe_moyen, pct, n_group, n_tot) %>%
+  select(canton_code, uni_fr, groupe_moyen, pct, n_group, n_tot,
+         ecart_vs_uni, ecart_vs_canton) %>%
   filter(
-    !canton_code %in% c("CH", "99"),  # exclure total national + "autres"
+    !canton_code %in% c("99"),  # exclure  "autres" et évent. total national ("CH")
     !uni_fr == "Autre",
     # uni_fr != "Total",
     n_group >= 5  # seuil minimum pour éviter les % bruités
@@ -482,6 +507,17 @@ viewof metrique = Inputs.radio(
   format: d => labels[d]
 })
 
+viewof affichage = Inputs.radio(["pct", "ecart"], {
+  value: "pct",
+  label: "Valeurs",
+  format: d => d === "pct" ? "Valeur absolue (%)" : "Écart à la moyenne (pp)"
+})
+
+// --- clé de valeur active selon mode et dimension
+val_key = affichage === "pct"    ? "pct"
+        : dim      === "uni"     ? "ecart_vs_uni"
+        :                          "ecart_vs_canton"
+
 facet_key = dim === "uni" ? "uni_fr"      : "canton_code"
 bar_key   = dim === "uni" ? "canton_code" : "uni_fr"
 
@@ -492,7 +528,6 @@ facets_ordered = {
     d => d[facet_key]
   )
   return [...agg.entries()]
-    .filter(([k]) => k !== "Total" && k !== "CH")
     .sort((a, b) => d3.descending(a[1], b[1]))
     .map(([k]) => k)
 }
@@ -508,19 +543,99 @@ data_f = data_t.filter(d =>
   selected.includes(d[facet_key])
 )
 
-max_global = d3.max(data_f, d => d.pct)
+// --- domaines selon mode
+max_global  = d3.max(data_f, d => d.pct)
+max_abs     = d3.max(data_f, d => Math.abs(d[val_key]))  // pour mode écart
 
 plots = facets_ordered
   .filter(f => selected.includes(f))
   .map(facet => {
     const fdata = data_f
       .filter(d => d[facet_key] === facet)
-      .sort((a, b) => d3.descending(a.pct, b.pct))
+      .sort((a, b) => d3.descending(a.pct, b.pct))  // tri toujours par pct
 
     if (fdata.length === 0) return null
 
-    const bar_h = 18
-    const h     = fdata.length * (bar_h + 4) + 40
+    const bar_h    = 18
+    const h        = fdata.length * (bar_h + 4) + 40
+    const is_ecart = affichage === "ecart"
+
+    const marks = [
+      // barre de fond (mode pct uniquement)
+      ...(is_ecart ? [] : [
+        Plot.barX(fdata, {
+          x: max_global,
+          y: bar_key,
+          fill: "#e5e7eb",
+          height: bar_h,
+          rx: 2
+        })
+      ]),
+      // ligne zéro (mode écart uniquement)
+      ...(is_ecart ? [
+        Plot.ruleX([0], { stroke: "#9ca3af", strokeWidth: 1 })
+      ] : []),
+      // barre principale
+      Plot.barX(fdata, {
+        x: val_key,
+        y: bar_key,
+        fill: is_ecart
+          ? d => d[val_key] >= 0 ? colors[metrique] : "#9ca3af"
+          : colors[metrique],
+        fillOpacity: d => (d[bar_key] === "CH" || d[bar_key] === "Total") ? 1 : 0.65,
+        height: bar_h,
+        rx: 2
+      }),
+      // label valeur — mode pct
+      ...(is_ecart ? [] : [
+        Plot.text(fdata, {
+          x: "pct",
+          y: bar_key,
+          text: d => d.pct.toFixed(1) + "%",
+          dx: 4,
+          textAnchor: "start",
+          fontSize: 10,
+          fill: "#374151"
+        })
+      ]),
+      // label valeur — mode écart
+
+          ...(is_ecart ? [
+      // valeurs positives
+      Plot.text(fdata.filter(d => d[val_key] >= 0), {
+        x: val_key,
+        y: bar_key,
+        text: d => "+" + d[val_key].toFixed(1),
+        dx: 4,
+        textAnchor: "start",
+        fontSize: 10,
+        fill: "#374151"
+      }),
+      // valeurs négatives
+      Plot.text(fdata.filter(d => d[val_key] < 0), {
+        x: val_key,
+        y: bar_key,
+        text: d => d[val_key].toFixed(1),
+        dx: -4,
+        textAnchor: "end",
+        fontSize: 10,
+        fill: "#374151"
+      })
+    ] : []),
+
+
+      // label nom (gauche)
+      Plot.text(fdata, {
+        x: is_ecart ? -max_abs * 1.08 : 0,  // ancrage gauche adapté
+        y: bar_key,
+        text: bar_key,
+        dx: -3,
+        textAnchor: "end",
+        fontSize: 10,
+        fontWeight: d => (d[bar_key] === "CH" || d[bar_key] === "Total") ? "700" : "400",
+        fill: d => (d[bar_key] === "CH" || d[bar_key] === "Total") ? "#111827" : "#374151"
+      })
+    ]
 
     const plot = Plot.plot({
       width: 280,
@@ -531,47 +646,15 @@ plots = facets_ordered
       marginBottom: 6,
       x: {
         axis: null,
-        domain: [0, max_global * 1.08]
+        domain: is_ecart
+          ? [-max_abs * 1.15, max_abs * 1.15]
+          : [0, max_global * 1.08]
       },
       y: {
         axis: null,
         domain: fdata.map(d => d[bar_key])
       },
-      marks: [
-        Plot.barX(fdata, {
-          x: max_global,
-          y: bar_key,
-          fill: "#e5e7eb",
-          height: bar_h,
-          rx: 2
-        }),
-        Plot.barX(fdata, {
-          x: "pct",
-          y: bar_key,
-          fill: colors[metrique],
-          height: bar_h,
-          rx: 2,
-          fillOpacity: 0.9
-        }),
-        Plot.text(fdata, {
-          x: "pct",
-          y: bar_key,
-          text: d => d.pct.toFixed(1) + "%",
-          dx: 4,
-          textAnchor: "start",
-          fontSize: 10,
-          fill: "#374151"
-        }),
-        Plot.text(fdata, {
-          x: 0,
-          y: bar_key,
-          text: bar_key,
-          dx: -3,
-          textAnchor: "end",
-          fontSize: 10,
-          fill: "#374151"
-        })
-      ],
+      marks,
       style: {
         fontSize: "10px",
         fontFamily: "inherit",
@@ -611,8 +694,326 @@ html`<style>
 ">${plots}</div>`
 ```
 
-## Niveau - ventilation canton - domaines d'étude
+# Niveau - ventilation canton - domaines d'étude
+
+Table de simplification des noms
 
 ```{r}
 
+library(tibble)
+
+labels_domaines <- tibble(
+  domaine = c(
+    "Droit (HEU)",
+    "Interdisciplinaire et autre (HEU)",
+    "Médecine et pharmacie (HEU)",
+    "Sciences exactes et naturelles (HEU)",
+    "Sciences humaines et sociales (HEU)",
+    "Sciences techniques (HEU)",
+    "Sciences économiques (HEU)",
+    "Total"
+  ),
+  domaine_lab_fr = c(
+    "Droit",
+    "Interdisciplinaire",
+    "Médecine & pharma",
+    "Sciences naturelles",
+    "Sciences humaines",
+    "Sciences techniques",
+    "Économie",
+    "Total"
+  ),
+  domaine_lab_de = c(
+    "Recht",
+    "Interdisziplinär",
+    "Medizin & Pharmazie",
+    "Naturwissenschaften",
+    "Geistes- & Sozialwiss.",
+    "Technische Wiss.",
+    "Wirtschaft",
+    "Total"
+  ),
+  label_short = c(
+    "Droit",
+    "Inter",
+    "Médecine",
+    "Sciences nat.",
+    "SHS",
+    "Tech",
+    "Éco",
+    "Total"
+  )
+)
+```
+
+### Agrégation des groupes et des ventilations
+
+```{r}
+
+df_canton_domaine <- df_canton_domaine %>% 
+  left_join(cle_categories, by = "categorie")
+
+# agregation par groupes (domaines)
+df_canton_canton_domaine_grouped <- df_canton_domaine %>% 
+  group_by(domaine, canton_code, annee, groupe_moyen) %>%
+  summarise(
+    pct = sum(pct, na.rm = TRUE),
+    n_tot = first(n),
+    .groups = "drop"
+  )%>% 
+  mutate(
+    n_group = round(n_tot * pct / 100, digits = 0)
+  )
+
+
+# agregation 3 ans
+df_canton_canton_domaine_grouped_3yrs <- df_canton_canton_domaine_grouped %>% 
+  group_by(canton_code, domaine, groupe_moyen) %>% 
+  summarise(
+    n_group = sum(n_group),
+    .groups = "drop"
+  ) %>% 
+  left_join(df_canton_canton_domaine_grouped %>% 
+              filter(groupe_moyen == "echec_abandon") %>% # filtre sur une catégorie
+              group_by(canton_code, domaine) %>% 
+              summarise(
+                n_tot = sum(n_tot)
+              )) %>% 
+  mutate(
+    pct = n_group / n_tot * 100
+  )
+
+df_canton_canton_domaine_grouped_3yrs <- df_canton_canton_domaine_grouped_3yrs %>% 
+  left_join(labels_domaines %>% 
+              select(domaine, domaine_lab_fr))
+```
+
+## Chart interactif observable (canton x domaines d'étude)
+
+Calcul des écarts à la moyennes
+
+```{r}
+
+# Référence 1 : moyenne nationale par domaine (canton_code == "TOT")
+ref_par_domaine <- df_canton_canton_domaine_grouped_3yrs %>%
+  filter(canton_code == "TOT") %>%
+  select(domaine, groupe_moyen, pct_ref_domaine = pct)
+
+# Référence 2 : moyenne cantonale toutes disciplines (domaine == "Total")
+ref_par_canton_d <- df_canton_canton_domaine_grouped_3yrs %>%
+  filter(domaine == "Total") %>%
+  mutate(canton_code = if_else(canton_code == "TOT", "CH", canton_code)) %>%
+  select(canton_code, groupe_moyen, pct_ref_canton_d = pct)
+
+# Jointure + calcul écarts + renommage domaine + remplacement TOT→CH
+df_ojs_domaine <- df_canton_canton_domaine_grouped_3yrs %>%
+  mutate(canton_code = if_else(canton_code == "TOT", "CH", canton_code)) %>%
+  left_join(
+    ref_par_domaine %>% mutate(),  # TOT déjà dans ref avant mutate
+    by = c("domaine", "groupe_moyen")
+  ) %>%
+  left_join(
+    ref_par_canton_d,
+    by = c("canton_code", "groupe_moyen")
+  ) %>%
+  mutate(
+    ecart_vs_domaine = round(pct - pct_ref_domaine, 1),
+    ecart_vs_canton  = round(pct - pct_ref_canton_d, 1)
+  ) %>%
+  select(canton_code, domaine = domaine_lab_fr, groupe_moyen,
+         pct, n_group, n_tot, ecart_vs_domaine, ecart_vs_canton) %>%
+  filter(canton_code != "99", n_group >= 5)
+
+ojs_define(data_domaine = df_ojs_domaine)
+```
+
+```{ojs}
+
+data_d = transpose(data_domaine)
+
+viewof dim_d = Inputs.radio(["domaine", "canton"], {
+  value: "domaine",
+  label: "Afficher par",
+  format: d => d === "domaine" ? "Domaine" : "Canton"
+})
+
+viewof metrique_d = Inputs.radio(
+  ["echec_abandon", "succes", "reorientation"], {
+  value: "echec_abandon",
+  label: "Indicateur",
+  format: d => labels[d]
+})
+
+viewof affichage_d = Inputs.radio(["pct", "ecart"], {
+  value: "pct",
+  label: "Valeurs",
+  format: d => d === "pct" ? "Valeur absolue (%)" : "Écart à la moyenne (pp)"
+})
+
+val_key_d = affichage_d === "pct"       ? "pct"
+          : dim_d       === "domaine"   ? "ecart_vs_domaine"
+          :                               "ecart_vs_canton"
+
+facet_key_d = dim_d === "domaine" ? "domaine"     : "canton_code"
+bar_key_d   = dim_d === "domaine" ? "canton_code" : "domaine"
+
+facets_ordered_d = {
+  const agg = d3.rollup(
+    data_d,
+    v => d3.max(v, d => d.n_tot),
+    d => d[facet_key_d]
+  )
+  return [...agg.entries()]
+    .sort((a, b) => d3.descending(a[1], b[1]))
+    .map(([k]) => k)
+}
+
+viewof selected_d = Inputs.select(facets_ordered_d, {
+  label: "Filtrer",
+  multiple: true,
+  value: facets_ordered_d.slice(0, 12)
+})
+
+data_f_d = data_d.filter(d =>
+  d.groupe_moyen === metrique_d &&
+  selected_d.includes(d[facet_key_d])
+)
+
+max_global_d = d3.max(data_f_d, d => d.pct)
+max_abs_d    = d3.max(data_f_d, d => Math.abs(d[val_key_d]))
+
+plots_d = facets_ordered_d
+  .filter(f => selected_d.includes(f))
+  .map(facet => {
+    const fdata = data_f_d
+      .filter(d => d[facet_key_d] === facet)
+      .sort((a, b) => d3.descending(a.pct, b.pct))
+
+    if (fdata.length === 0) return null
+
+    const bar_h    = 18
+    const h        = fdata.length * (bar_h + 4) + 40
+    const is_ecart = affichage_d === "ecart"
+
+    const marks = [
+      ...(is_ecart ? [] : [
+        Plot.barX(fdata, {
+          x: max_global_d,
+          y: bar_key_d,
+          fill: "#e5e7eb",
+          height: bar_h,
+          rx: 2
+        })
+      ]),
+      ...(is_ecart ? [
+        Plot.ruleX([0], { stroke: "#9ca3af", strokeWidth: 1 })
+      ] : []),
+      Plot.barX(fdata, {
+        x: val_key_d,
+        y: bar_key_d,
+        fill: is_ecart
+          ? d => d[val_key_d] >= 0 ? colors[metrique_d] : "#9ca3af"
+          : colors[metrique_d],
+        fillOpacity: d => (d[bar_key_d] === "CH" || d[bar_key_d] === "Total") ? 1 : 0.65,
+        height: bar_h,
+        rx: 2
+      }),
+      ...(is_ecart ? [] : [
+        Plot.text(fdata, {
+          x: "pct",
+          y: bar_key_d,
+          text: d => d.pct.toFixed(1) + "%",
+          dx: 4,
+          textAnchor: "start",
+          fontSize: 10,
+          fill: "#374151"
+        })
+      ]),
+      ...(is_ecart ? [
+        Plot.text(fdata.filter(d => d[val_key_d] >= 0), {
+          x: val_key_d,
+          y: bar_key_d,
+          text: d => "+" + d[val_key_d].toFixed(1),
+          dx: 4,
+          textAnchor: "start",
+          fontSize: 10,
+          fill: "#374151"
+        }),
+        Plot.text(fdata.filter(d => d[val_key_d] < 0), {
+          x: val_key_d,
+          y: bar_key_d,
+          text: d => d[val_key_d].toFixed(1),
+          dx: -4,
+          textAnchor: "end",
+          fontSize: 10,
+          fill: "#374151"
+        })
+      ] : []),
+      Plot.text(fdata, {
+        x: is_ecart ? -max_abs_d * 1.08 : 0,
+        y: bar_key_d,
+        text: bar_key_d,
+        dx: -3,
+        textAnchor: "end",
+        fontSize: 10,
+        fontWeight: d => (d[bar_key_d] === "CH" || d[bar_key_d] === "Total") ? "700" : "400",
+        fill: d => (d[bar_key_d] === "CH" || d[bar_key_d] === "Total") ? "#111827" : "#374151"
+      })
+    ]
+
+    const plot = Plot.plot({
+      width: 280,
+      height: h,
+      marginLeft: 90,
+      marginRight: 42,
+      marginTop: 6,
+      marginBottom: 6,
+      x: {
+        axis: null,
+        domain: is_ecart
+          ? [-max_abs_d * 1.15, max_abs_d * 1.15]
+          : [0, max_global_d * 1.08]
+      },
+      y: {
+        axis: null,
+        domain: fdata.map(d => d[bar_key_d])
+      },
+      marks,
+      style: {
+        fontSize: "10px",
+        fontFamily: "inherit",
+        background: "transparent",
+        overflow: "visible",
+        width: "100%"
+      }
+    })
+
+    return html`<div style="
+      background: #f9fafb;
+      border: 1px solid #e5e7eb;
+      border-radius: 6px;
+      padding: 10px 6px 8px 6px;
+    ">
+      <div style="
+        font-weight: 700;
+        font-size: 13px;
+        text-align: center;
+        margin-bottom: 4px;
+      ">${facet}</div>
+      ${plot}
+    </div>`
+  })
+  .filter(Boolean)
+
+html`<style>
+  @media (max-width: 600px) {
+    .sm-grid-d { grid-template-columns: repeat(2, 1fr) !important; }
+  }
+</style>
+<div class="sm-grid-d" style="
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 10px;
+  margin-top: 8px;
+">${plots_d}</div>`
 ```
