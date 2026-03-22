@@ -7,4 +7,5 @@ Bienvenue dans le tableau de bord des analyses.
 - [Discipline](discipline.qmd)
 - [Districts](districts.qmd)
 - [Évolution](evolution.qmd)
-- [Production](prod_analysis_px.qmd)
+- [Production PX](prod_analysis_px.qmd)
+- [Production BFS delivery](bfs_delivery_prod.qmd)
